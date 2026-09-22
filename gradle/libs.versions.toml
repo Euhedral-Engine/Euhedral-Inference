@@ -9,3 +9,4 @@ junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher
 slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
 
 [plugins]
+spotless = { id = "com.diffplug.spotless", version = "8.8.0" }

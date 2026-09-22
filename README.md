@@ -39,7 +39,15 @@ correct Gradle and Java versions are selected automatically.
 
 ## Formatting
 
-Formatting is applied via Spotless (see `core`/`app` build files once added).
+Formatting is enforced via [Spotless](https://github.com/diffplug/spotless) with Palantir Java Format.
+
+```bash
+# Apply formatting to all sources
+./gradlew spotlessApply
+
+# Check formatting (used in CI)
+./gradlew spotlessCheck
+```
 
 ---
 

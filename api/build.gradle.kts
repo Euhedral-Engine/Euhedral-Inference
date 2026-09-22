@@ -1,6 +1,13 @@
 plugins {
     java
     application
+    alias(libs.plugins.spotless)
+}
+
+spotless {
+    java {
+        palantirJavaFormat("2.96.0")
+    }
 }
 
 application {

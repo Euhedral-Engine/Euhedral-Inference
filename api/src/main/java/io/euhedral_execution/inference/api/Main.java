@@ -7,8 +7,7 @@ import io.euhedral_execution.inference.core.InferenceEngine;
  */
 public final class Main {
 
-    private Main() {
-    }
+    private Main() {}
 
     public static void main(String[] args) {
         InferenceEngine engine = new InferenceEngine();
