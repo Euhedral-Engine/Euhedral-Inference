@@ -35,5 +35,4 @@ public record QwenConfig(
         boolean tieWordEmbeddings,
         boolean attentionOutputGate,
 
-        int mtpLayerCount) {
-}
+        int mtpLayerCount) {}
