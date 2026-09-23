@@ -106,7 +106,7 @@ final class QwenExecutionFixtures {
         public void copyDeviceToHost(MemorySegment destination, long source, long byteSize) {}
 
         @Override
-        public void free(long address) {
+        public synchronized void free(long address) {
             if (address == failAddressOnce) {
                 failAddressOnce = 0;
                 throw new IllegalStateException("injected workspace free failure");

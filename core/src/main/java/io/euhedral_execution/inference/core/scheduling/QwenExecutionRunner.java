@@ -13,13 +13,15 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
-/// A directly pluggable Euhedral source. Producers publish ready instructions to an MPSC queue;
-/// Euhedral owns `pull`, `request`, and synchronous pushes. Producers only enqueue work.
+/// A directly pluggable Euhedral source. Producers publish ready operation state to an MPSC queue;
+/// Euhedral owns `pull`, `request`, frame checkout, and synchronous pushes.
 public final class QwenExecutionRunner implements LatticeSource {
+
+    private static final Function<AbstractFrame, Boolean> NEVER_STOP = ignored -> false;
 
     private final QwenExecutionPlan plan;
     private final QwenExecutionGpu gpu;
-    private final PartitionedMpscQueue<AbstractFrame> ready = new PartitionedMpscQueue<>(8_192);
+    private final PartitionedMpscQueue<QwenExecutionContext> ready;
     private final QwenWorkGenerator generator;
     private final AtomicInteger active = new AtomicInteger();
     private final AtomicBoolean attached = new AtomicBoolean();
@@ -35,6 +37,7 @@ public final class QwenExecutionRunner implements LatticeSource {
             QwenExecutionPlan plan, QwenExecutionGpu gpu, Consumer<? super QwenExecutionContext> terminalConsumer) {
         this.plan = Objects.requireNonNull(plan, "plan");
         this.gpu = Objects.requireNonNull(gpu, "gpu");
+        this.ready = new PartitionedMpscQueue<>(plan.instructions().size(), 64);
         this.generator = new QwenWorkGenerator(plan, gpu, this, terminalConsumer);
     }
 
@@ -64,9 +67,17 @@ public final class QwenExecutionRunner implements LatticeSource {
         return outcome.copy();
     }
 
-    /// Called by frame completion, possibly on another thread; it only publishes to the MPSC queue.
-    boolean offer(AbstractFrame frame) {
-        return ready.offer(frame);
+    /// Called by producers; each partition is bound to one immutable plan instruction.
+    boolean offerReady(int instructionId, QwenExecutionContext context) {
+        return this.ready.offer(instructionId, context);
+    }
+
+    QwenExecutionContext peekReady(int instructionId) {
+        return this.ready.peek(instructionId);
+    }
+
+    QwenExecutionContext pollReady(int instructionId) {
+        return this.ready.poll(instructionId);
     }
 
     @Override
@@ -87,14 +98,14 @@ public final class QwenExecutionRunner implements LatticeSource {
         Objects.requireNonNull(consumer, "consumer");
         Objects.requireNonNull(stopCondition, "stopCondition");
         if (requested <= 0 || finished.get()) return 0;
-        return ready.drain(consumer, stopCondition, requested);
+        return this.generator.drain(consumer, stopCondition, requested);
     }
 
     @Override
     public void request(long requested) {
         if (requested <= 0 || finished.get()) return;
         LatticeReceiver receiver = downstream.get();
-        if (receiver != null) ready.drain(receiver::push, requested);
+        if (receiver != null) this.generator.drain(receiver::push, NEVER_STOP, requested);
     }
 
     @Override

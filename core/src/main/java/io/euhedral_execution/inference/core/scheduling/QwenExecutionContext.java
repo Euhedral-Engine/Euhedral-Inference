@@ -107,11 +107,13 @@ public final class QwenExecutionContext {
         if (first != TERMINAL_SUCCESS && first != cause) first.addSuppressed(cause);
     }
 
-    boolean hasFailureOrCancellation() {
+    /// Reports whether this quantum must stop admitting dependent instructions.
+    public boolean hasFailureOrCancellation() {
         return this.failure.get() != null || this.sequence.cancellationRequested();
     }
 
-    Throwable failure() {
+    /// Returns the first operation failure, if one has been recorded.
+    public Throwable failure() {
         return this.failure.get();
     }
 
@@ -135,7 +137,8 @@ public final class QwenExecutionContext {
         return left == 0;
     }
 
-    long allocateTemporaryTokenIds(QwenExecutionGpu gpu, long bytes) {
+    /// Allocates this quantum's temporary token-ID upload buffer.
+    public long allocateTemporaryTokenIds(QwenExecutionGpu gpu, long bytes) {
         this.temporaryTokenIdsAddress = gpu.allocate(bytes);
         if (this.temporaryTokenIdsAddress == 0) {
             throw new IllegalStateException("GPU returned a null token-ID address");
@@ -143,7 +146,8 @@ public final class QwenExecutionContext {
         return this.temporaryTokenIdsAddress;
     }
 
-    void releaseTemporaryTokenIds(QwenExecutionGpu gpu) {
+    /// Releases the temporary token-ID upload buffer when its embedding instruction is finalized.
+    public void releaseTemporaryTokenIds(QwenExecutionGpu gpu) {
         if (this.temporaryTokenIdsAddress != 0) {
             gpu.free(this.temporaryTokenIdsAddress);
             this.temporaryTokenIdsAddress = 0;

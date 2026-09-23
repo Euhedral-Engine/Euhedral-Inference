@@ -18,33 +18,47 @@ transformer-layer control loop.
   dependency counters, outstanding-frame count, failure/cancellation outcome, and its GPU workspace.
   Intermediate buffers have distinct addresses for the embedding, normalized activation, and each
   projection. They are retained until all admitted frames finish; no per-access buffer lock is used.
-- `QwenExecutionRunner` implements `LatticeSource` directly. It admits quanta and exposes ready
-  `AbstractFrame` instances through an `euhedral-data-structures` partitioned MPSC queue. The
-  scheduler controls `pull` and `request`; they have exclusive entry. Publication from frame
-  completion or an external coordinator can happen on other threads, but publication only enqueues.
-  `request` synchronously drains ready work and pushes it directly to Euhedral. `pull` delivers
-  existing frames to its consumer without accumulating demand, manufacturing work, or pushing to the
-  downstream. Empty requests do not leave outstanding credits; Euhedral must request again to
-  service later arrivals. Both calls bulk-drain the queue without a per-frame demand counter. The
-  Euhedral-owned `pull` consumer and downstream `push` do not throw.
+- `QwenExecutionRunner` implements `LatticeSource` directly. It admits quanta and queues each ready
+  context in the MPSC partition belonging to its immutable instruction. Worker completion and
+  admission may enqueue concurrently; neither path creates a frame. The scheduler controls `pull`
+  and `request`, which have exclusive entry. On that serialized source path, the runner checks out a
+  pooled frame and supplies the queued quantum context. `request` synchronously drains ready work and
+  pushes frames directly to Euhedral. `pull` delivers frames to its consumer without accumulating
+  demand or pushing downstream. Empty requests do not leave outstanding credits; Euhedral must request
+  again to service later arrivals. Both calls bulk-drain ready work without a per-frame demand counter.
+  The Euhedral-owned `pull` consumer and downstream `push` do not throw.
 
 ## Instruction availability
 
-A quantum initially publishes one `EmbeddingFrame`. Each frame invokes a standalone CUDA operation
-and synchronizes before reporting completion. `QwenWorkGenerator` follows precomputed successor
-edges only; it decrements dependency counters and publishes every newly ready frame. It does not
-walk the full model or call a layer method that drives the next operation. Independent projections
-from one normalized activation receive separate `Q3LinearFrame` instances and output buffers.
+The concrete `EmbeddingFrame`, `RmsNormFrame`, and `LinearFrame` each live in their own source file
+under `scheduling/frames`. A quantum initially queues its embedding operation context. Each frame
+invokes a standalone CUDA operation and synchronizes before reporting completion. `QwenWorkGenerator`
+follows precomputed successor edges only; it decrements dependency counters and queues each newly
+ready operation context. It does not walk the full model or call a layer method that drives the next
+operation. Independent projections from one normalized activation receive separate `LinearFrame`
+instances and output buffers.
 
 ```text
-embedding output -> RMSNormFrame -> Q3LinearFrame (projection A)
-                                 -> Q3LinearFrame (projection B)
+embedding output -> RmsNormFrame -> LinearFrame (projection A)
+                                  -> LinearFrame (projection B)
 ```
 
-`RmsNormFrame` and `Q3LinearFrame` borrow their weight handles and buffer addresses. Their frame-local
+All three frame types borrow their weight handles and buffer addresses. Their frame-local
 completion state has one worker owner; shared dependency counts and terminal ownership use atomics.
-Successor publication is reserved before enqueue so inline execution cannot finalize a workspace
-while a sibling instruction is still pending. CUDA operations do not import Euhedral types.
+Each successor's work reservation is recorded before enqueue, while the completing frame retains its
+own reservation through fan-out; inline execution therefore cannot finalize a workspace while a
+sibling instruction remains pending. CUDA operations do not import Euhedral types.
+
+`QwenWorkGenerator` owns a Euhedral `FrameManager` for each fixed instruction: this keeps a linear
+frame's weight binding immutable even when several `LinearFrame` instructions exist. Checkout passes
+only the new quantum context; no per-checkout wrapper or instruction copy is created. `getOrCreate`
+runs only on the serialized `pull`/`request` path, so there is no manager lock on frame checkout.
+Successful and failed finalization enqueue successor contexts, clear the completed quantum reference,
+and then return the frame to its manager. Undelivered frames are cleared and recycled on the source
+path if their quantum is cancelled. The manager's MPSC return queue accepts concurrent worker returns.
+Reuse is best-effort when its bounded pool is full; execution does not depend on a frame being retained.
+Frame references expire at finalization: callers must not retain or invoke a recycled frame, since the
+manager can issue the same object for another quantum.
 
 The default compact-model plan currently performs embedding only. The explicit norm/projection
 constructor is an operator slice for verified, semantically matched inputs; it is not a claim that
@@ -58,7 +72,9 @@ synchronization. On success, a terminal consumer may read the still-live GPU buf
 workspace and temporary token-ID buffer are released and the sequence lease is committed. The
 caller receives a copy of the completion future, so it cannot publish a false terminal outcome.
 Failure or cancellation prevents new successors, but already admitted frames still finalize before buffer
-release. A failed token-ID free is retried at terminal cleanup without discarding its address.
+release. Ready contexts that have not been materialized are reaped only when the source next services
+`pull` or `request`; without another source call, a cancelled quantum can remain outstanding. A failed
+token-ID free is retried at terminal cleanup without discarding its address.
 External cancellation is cooperative and does not interrupt an executing GPU call.
 Cancellation that wins before the sequence lease is claimed produces a cancelled quantum, even if
 it arrives between initial validation and the claim. Workspace allocations begin only after the
