@@ -20,8 +20,14 @@ import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenLayer
 import io.euhedral_execution.inference.core.model_loader.layer_weights.TensorDataType;
 import io.euhedral_execution.inference.core.model_loader.layer_weights.TensorHandle;
 import io.euhedral_execution.inference.core.model_loader.layer_weights.WeightFormat;
+import java.lang.reflect.Modifier;
 import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
@@ -299,6 +305,106 @@ class QwenExecutionPlanTest {
         assertEquals(1L, sequence.currentTokenPosition());
         assertThrows(IllegalStateException.class, () -> sequence.setKvCacheState(lease, "stale"));
         assertThrows(IllegalStateException.class, () -> sequence.releaseExecution(lease, 2L));
+    }
+
+    @Test
+    void sequenceStateMethodsDoNotAcquireIntrinsicMonitors() {
+        for (var method : QwenSequenceState.class.getDeclaredMethods()) {
+            assertFalse(
+                    Modifier.isSynchronized(method.getModifiers()),
+                    () -> "QwenSequenceState method uses an intrinsic monitor: " + method.getName());
+        }
+    }
+
+    @Test
+    void concurrentClaimersPublishExactlyOneExecutionLease() throws Exception {
+        int contenders = 24;
+        QwenSequenceState sequence = new QwenSequenceState(52L);
+        ExecutorService executor = Executors.newFixedThreadPool(contenders);
+        CountDownLatch ready = new CountDownLatch(contenders);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<QwenSequenceState.ExecutionLease>> claims = new java.util.ArrayList<>(contenders);
+        try {
+            for (int index = 0; index < contenders; index++) {
+                claims.add(executor.submit(() -> {
+                    ready.countDown();
+                    if (!start.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("claim race did not start");
+                    }
+                    try {
+                        return sequence.claimExecution(0L);
+                    } catch (IllegalStateException alreadyClaimed) {
+                        return null;
+                    }
+                }));
+            }
+            assertTrue(ready.await(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+            start.countDown();
+            int winners = 0;
+            QwenSequenceState.ExecutionLease winner = null;
+            for (Future<QwenSequenceState.ExecutionLease> claim : claims) {
+                QwenSequenceState.ExecutionLease lease = claim.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                if (lease != null) {
+                    winners++;
+                    winner = lease;
+                }
+            }
+            assertEquals(1, winners);
+            sequence.releaseExecution(winner, 1L);
+            assertEquals(1L, sequence.currentTokenPosition());
+        } finally {
+            start.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void cancellationBeforeLeaseReleasePreventsTokenPositionPublication() {
+        QwenSequenceState sequence = new QwenSequenceState(54L);
+        QwenSequenceState.ExecutionLease lease = sequence.claimExecution(0L);
+
+        sequence.cancel();
+
+        assertTrue(sequence.releaseExecutionAndCheckCancellation(lease, 1L));
+        assertEquals(QwenSequenceState.TerminalState.CANCELLED, sequence.terminalState());
+        assertFalse(sequence.isExecutionClaimed());
+        assertEquals(0L, sequence.currentTokenPosition());
+    }
+
+    @Test
+    void cancellationRacingWithClaimIsResolvedByOneAtomicStateTransition() throws Exception {
+        QwenSequenceState sequence = new QwenSequenceState(53L);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<QwenSequenceState.ExecutionLease> claim = executor.submit(() -> {
+                assertTrue(start.await(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+                try {
+                    return sequence.claimExecution(0L);
+                } catch (IllegalStateException cancellationWon) {
+                    return null;
+                }
+            });
+            Future<Void> cancel = executor.submit((Callable<Void>) () -> {
+                assertTrue(start.await(TIMEOUT_SECONDS, TimeUnit.SECONDS));
+                sequence.cancel();
+                return null;
+            });
+            start.countDown();
+
+            QwenSequenceState.ExecutionLease lease = claim.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            cancel.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            assertTrue(sequence.cancellationRequested());
+            if (lease != null) {
+                assertTrue(sequence.releaseExecutionAndCheckCancellation(lease, 1L));
+            }
+            assertEquals(QwenSequenceState.TerminalState.CANCELLED, sequence.terminalState());
+            assertFalse(sequence.isExecutionClaimed());
+            assertEquals(0L, sequence.currentTokenPosition());
+        } finally {
+            start.countDown();
+            executor.shutdownNow();
+        }
     }
 
     private static QwenWeights weights(QwenLayerType... layerTypes) {

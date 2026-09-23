@@ -157,15 +157,20 @@ public final class QwenExecutionContext {
                     return new PipelineFrame.Outcome(
                             PipelineFrame.Status.FAILED,
                             new IllegalStateException("Successful Qwen outcome has no active execution lease"));
-                } else if (this.pendingCancellation || this.sequenceState.cancellationRequested()) {
+                } else if (this.pendingCancellation) {
                     this.sequenceState.markCancelled(this.executionLease);
                     this.executionLease = null;
                     this.result = null;
                     this.pendingCancellation = false;
                     return new PipelineFrame.Outcome(PipelineFrame.Status.CANCELLED, null);
                 } else {
-                    this.sequenceState.releaseExecution(this.executionLease, this.result.nextTokenPosition());
+                    boolean cancellationWon = this.sequenceState.releaseExecutionAndCheckCancellation(
+                            this.executionLease, this.result.nextTokenPosition());
                     this.executionLease = null;
+                    if (cancellationWon) {
+                        this.result = null;
+                        return new PipelineFrame.Outcome(PipelineFrame.Status.CANCELLED, null);
+                    }
                 }
                 this.pendingCancellation = false;
                 return outcome;

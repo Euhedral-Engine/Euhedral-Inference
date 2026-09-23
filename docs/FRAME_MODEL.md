@@ -163,6 +163,12 @@ Cancellation remains a coordinator request that may target the active chain. A l
 admitted only after the prior outcome has published. Parallelism is across independent sequence states,
 not across dependent layers of one sequence.
 
+The state is published as one immutable snapshot through an `AtomicReference`. Claims, cancellation,
+terminal transitions, and lease-protected mutations use compare-and-set loops; no intrinsic monitor or
+blocking lock is used. This makes the multi-field transitions linearizable while retaining lock-free
+progress under contention. Lease release resolves a concurrent cancellation request in the same CAS that
+releases ownership, so cancellation cannot slip between a separate check and token-position publication.
+
 ### `QwenExecutionContext`
 
 The context is a per-submission mutable envelope. It is not pooled independently from its enclosing
