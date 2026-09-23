@@ -34,7 +34,7 @@ public final class QwenArtifactReader {
 
     private static QwenArtifactHeader readHeader(FileChannel channel) throws IOException {
         ByteBuffer bytes = ByteBuffer.allocate(QwenArtifactHeader.BYTE_SIZE).order(QwenArtifactCodec.BYTE_ORDER);
-        readFully(channel, 0, bytes, "header");
+        ArtifactFileAccess.readFully(channel, 0, bytes, "header");
         bytes.flip();
         int magic = bytes.getInt();
         int version = bytes.getInt();
@@ -134,23 +134,8 @@ public final class QwenArtifactReader {
             throw new QwenArtifactFormatException(field + " size is outside the supported range");
         }
         ByteBuffer bytes = ByteBuffer.allocate((int) size);
-        readFully(channel, offset, bytes, field);
+        ArtifactFileAccess.readFully(channel, offset, bytes, field);
         return bytes.array();
-    }
-
-    private static void readFully(FileChannel channel, long offset, ByteBuffer destination, String field)
-            throws IOException {
-        long position = offset;
-        while (destination.hasRemaining()) {
-            int read = channel.read(destination, position);
-            if (read < 0) {
-                throw new QwenArtifactFormatException("artifact is truncated while reading " + field);
-            }
-            if (read == 0) {
-                throw new QwenArtifactFormatException("unable to read " + field);
-            }
-            position += read;
-        }
     }
 
     private static final class TableCursor {
@@ -180,7 +165,7 @@ public final class QwenArtifactReader {
                 throw new QwenArtifactFormatException("tensor table is truncated while reading " + field);
             }
             ByteBuffer bytes = ByteBuffer.allocate(size).order(QwenArtifactCodec.BYTE_ORDER);
-            readFully(channel, position, bytes, field);
+            ArtifactFileAccess.readFully(channel, position, bytes, field);
             position += size;
             return bytes.array();
         }
