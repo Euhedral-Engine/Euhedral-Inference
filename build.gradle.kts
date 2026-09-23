@@ -6,7 +6,7 @@ import org.gradle.jvm.toolchain.JavaLanguageVersion
 subprojects {
     plugins.withId("java") {
         the<JavaPluginExtension>().toolchain {
-            languageVersion = JavaLanguageVersion.of(21)
+            languageVersion = JavaLanguageVersion.of(25)
         }
         tasks.withType<Test>().configureEach {
             useJUnitPlatform()

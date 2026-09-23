@@ -13,7 +13,7 @@ This is a multi-module Gradle project:
 
 ## Requirements
 
-- Java 21 (JDK)
+- Java 25 (JDK)
 - Gradle 9.6.1 (the committed wrapper handles the rest)
 
 The toolchain is pinned via `.mise.toml`; with [mise](https://mise.jdx.dev) installed, the
