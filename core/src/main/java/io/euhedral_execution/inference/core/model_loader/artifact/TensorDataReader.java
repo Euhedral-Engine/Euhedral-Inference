@@ -1,7 +1,8 @@
 package io.euhedral_execution.inference.core.model_loader.artifact;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -11,15 +12,15 @@ public final class TensorDataReader {
 
     private TensorDataReader() {}
 
-    public static ByteBuffer read(Path path, TensorDescriptor tensor) throws IOException {
+    public static MemorySegment read(Path path, TensorDescriptor tensor, Arena arena) throws IOException {
         if (path == null) {
             throw new QwenArtifactFormatException("input path is null");
         }
         if (tensor == null) {
             throw new QwenArtifactFormatException("tensor descriptor is null");
         }
-        if (tensor.byteSize() > Integer.MAX_VALUE) {
-            throw new QwenArtifactFormatException("tensor byte size is too large for a ByteBuffer");
+        if (arena == null) {
+            throw new QwenArtifactFormatException("arena is null");
         }
         long payloadEnd = QwenArtifactCodec.checkedEnd(tensor.dataOffset(), tensor.byteSize(), "tensor data");
 
@@ -27,9 +28,8 @@ public final class TensorDataReader {
             if (payloadEnd > channel.size()) {
                 throw new QwenArtifactFormatException("tensor payload extends beyond the file: " + tensor.name());
             }
-            ByteBuffer payload = ByteBuffer.allocate((int) tensor.byteSize());
+            MemorySegment payload = arena.allocate(tensor.byteSize());
             ArtifactFileAccess.readFully(channel, tensor.dataOffset(), payload, "tensor payload");
-            payload.flip();
             return payload;
         }
     }
