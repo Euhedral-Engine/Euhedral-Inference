@@ -14,14 +14,25 @@ import java.util.Objects;
 ///
 /// CUDA device addresses remain opaque longs. They are converted to zero-size address segments only
 /// inside the native calls and are never exposed as dereferenceable Java memory.
-public final class CudaGpuMemory implements GpuMemory, AutoCloseable {
+public final class CudaGpuMemory implements QwenExecutionGpu, AutoCloseable {
 
     private static final FunctionDescriptor MALLOC = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.JAVA_LONG);
-    private static final FunctionDescriptor FREE = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS);
+    private static final FunctionDescriptor FREE = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS);
     private static final FunctionDescriptor DEVICE_MEMORY_INFO =
             FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS);
     private static final FunctionDescriptor COPY = FunctionDescriptor.of(
             ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG);
+    private static final FunctionDescriptor EMBED_Q3 = FunctionDescriptor.of(
+            ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,
+            ValueLayout.ADDRESS,
+            ValueLayout.ADDRESS,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_LONG);
+    private static final FunctionDescriptor SYNCHRONIZE = FunctionDescriptor.of(ValueLayout.JAVA_INT);
+    private static final int CUDA_FORMAT_MISMATCH = -3;
 
     private final Arena arena;
     private final MethodHandle malloc;
@@ -29,6 +40,8 @@ public final class CudaGpuMemory implements GpuMemory, AutoCloseable {
     private final MethodHandle deviceMemoryInfo;
     private final MethodHandle copyHostToDevice;
     private final MethodHandle copyDeviceToHost;
+    private final MethodHandle embedQ3;
+    private final MethodHandle synchronize;
     private boolean closed;
 
     public CudaGpuMemory(Path libraryPath) {
@@ -43,6 +56,8 @@ public final class CudaGpuMemory implements GpuMemory, AutoCloseable {
             this.deviceMemoryInfo = bind(linker, symbols, "euhedral_cuda_device_memory_info", DEVICE_MEMORY_INFO);
             this.copyHostToDevice = bind(linker, symbols, "euhedral_cuda_copy_host_to_device", COPY);
             this.copyDeviceToHost = bind(linker, symbols, "euhedral_cuda_copy_device_to_host", COPY);
+            this.embedQ3 = bind(linker, symbols, "euhedral_cuda_embed_q3", EMBED_Q3);
+            this.synchronize = bind(linker, symbols, "euhedral_cuda_synchronize", SYNCHRONIZE);
         } catch (RuntimeException exception) {
             loadedLibraryArena.close();
             throw exception;
@@ -94,15 +109,71 @@ public final class CudaGpuMemory implements GpuMemory, AutoCloseable {
     }
 
     @Override
+    public void embedQ3(
+            long tokenIdsAddress,
+            long embeddingAddress,
+            long embeddingByteSize,
+            long hiddenStateAddress,
+            int tokenCount,
+            int vocabularySize,
+            int hiddenSize) {
+        ensureOpen();
+        requireDeviceAddress(tokenIdsAddress);
+        requireDeviceAddress(embeddingAddress);
+        requireDeviceAddress(hiddenStateAddress);
+        if (embeddingByteSize <= 0 || tokenCount <= 0 || vocabularySize <= 0 || hiddenSize <= 0) {
+            throw new IllegalArgumentException("Q3 embedding sizes must be positive");
+        }
+        if (hiddenSize % 64 != 0) {
+            throw new IllegalArgumentException("Q3 embedding hidden size must be divisible by 64");
+        }
+        int status;
+        try {
+            status = (int) embedQ3.invokeExact(
+                    MemorySegment.ofAddress(tokenIdsAddress),
+                    MemorySegment.ofAddress(embeddingAddress),
+                    MemorySegment.ofAddress(hiddenStateAddress),
+                    tokenCount,
+                    vocabularySize,
+                    hiddenSize,
+                    embeddingByteSize);
+        } catch (Throwable throwable) {
+            throw new GpuMemoryException("Q3 embedding invocation failed", throwable);
+        }
+        if (status != 0) {
+            String operation = status == CUDA_FORMAT_MISMATCH ? "Q3 embedding format/layout mismatch" : "Q3 embedding";
+            throw new GpuMemoryException(operation, status);
+        }
+    }
+
+    @Override
+    public void synchronize() {
+        ensureOpen();
+        int status;
+        try {
+            status = (int) synchronize.invokeExact();
+        } catch (Throwable throwable) {
+            throw new GpuMemoryException("CUDA device synchronization invocation failed", throwable);
+        }
+        if (status != 0) {
+            throw new GpuMemoryException("CUDA device synchronization", status);
+        }
+    }
+
+    @Override
     public void free(long address) {
         ensureOpen();
         if (address == 0) {
             return;
         }
+        int status;
         try {
-            free.invokeExact(MemorySegment.ofAddress(address));
+            status = (int) free.invokeExact(MemorySegment.ofAddress(address));
         } catch (Throwable throwable) {
             throw new GpuMemoryException("CUDA free invocation failed", throwable);
+        }
+        if (status != 0) {
+            throw new GpuMemoryException("CUDA free", status);
         }
     }
 

@@ -27,9 +27,22 @@ pub fn build(b: *std.Build) void {
         .file = b.path("src/euhedral_cuda.c"),
         .flags = &.{"-std=c11", "-fvisibility=hidden"},
     });
+    library.root_module.addCSourceFile(.{
+        .file = b.path("src/q3_embedding.c"),
+        .flags = &.{"-std=c11", "-fvisibility=hidden"},
+    });
     library.root_module.addIncludePath(b.path("include"));
     library.root_module.addIncludePath(.{.cwd_relative = cuda_include_dir});
     library.root_module.addLibraryPath(.{.cwd_relative = cuda_lib_dir});
     library.root_module.linkSystemLibrary("cudart", .{});
+    library.root_module.linkSystemLibrary("nvrtc", .{});
+    if (target.result.os.tag == .windows) {
+        library.root_module.linkSystemLibrary("nvcuda", .{});
+    } else {
+        library.root_module.linkSystemLibrary("cuda", .{});
+        library.root_module.linkSystemLibrary("pthread", .{});
+        library.root_module.linkSystemLibrary("dl", .{});
+    }
     b.installArtifact(library);
+    b.installFile("src/q3_embedding.cu", "share/euhedral_cuda/q3_embedding.cu");
 }

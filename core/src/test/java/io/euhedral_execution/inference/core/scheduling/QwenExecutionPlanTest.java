@@ -10,7 +10,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.euhedral_execution.core.frames.PipelineFrame;
 import io.euhedral_execution.core.generics.AbstractExecutor;
+import io.euhedral_execution.inference.core.gpu.QwenExecutionGpu;
 import io.euhedral_execution.inference.core.model_loader.QwenWeights;
+import io.euhedral_execution.inference.core.model_loader.artifact.CompactTensorLayout;
 import io.euhedral_execution.inference.core.model_loader.config.QwenConfig;
 import io.euhedral_execution.inference.core.model_loader.config.QwenLayerType;
 import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenAttentionWeights;
@@ -20,6 +22,7 @@ import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenLayer
 import io.euhedral_execution.inference.core.model_loader.layer_weights.TensorDataType;
 import io.euhedral_execution.inference.core.model_loader.layer_weights.TensorHandle;
 import io.euhedral_execution.inference.core.model_loader.layer_weights.WeightFormat;
+import io.euhedral_execution.inference.core.model_loader.layer_weights.WeightLayout;
 import java.lang.reflect.Modifier;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -37,11 +40,10 @@ class QwenExecutionPlanTest {
 
     @Test
     void oneSubmissionExecutesPreparationLayersAndTerminalInModelOrder() throws Exception {
-        QwenExecutionPlan plan =
-                new QwenExecutionPlan(weights(QwenLayerType.FULL_ATTENTION, QwenLayerType.GATED_DELTA_NET));
+        QwenExecutionPlan plan = plan(weights(QwenLayerType.FULL_ATTENTION, QwenLayerType.GATED_DELTA_NET));
         QwenSequenceState sequence = new QwenSequenceState(11L);
-        QwenExecutionContext context =
-                new QwenExecutionContext(plan, sequence, QwenExecutionContext.ExecutionKind.PREFILL, 0L, 3);
+        QwenExecutionContext context = new QwenExecutionContext(
+                plan, sequence, QwenExecutionContext.ExecutionKind.PREFILL, 0L, new int[] {0, 1, 2});
         QwenExecutionRunner runner = plan.newRunner();
 
         try (RunnerDriver driver = new RunnerDriver(runner)) {
@@ -67,7 +69,7 @@ class QwenExecutionPlanTest {
 
     @Test
     void mixedLayerTopologyProducesPreselectedOperations() {
-        QwenExecutionPlan plan = new QwenExecutionPlan(
+        QwenExecutionPlan plan = plan(
                 weights(QwenLayerType.FULL_ATTENTION, QwenLayerType.GATED_DELTA_NET, QwenLayerType.FULL_ATTENTION));
 
         assertEquals(
@@ -82,7 +84,7 @@ class QwenExecutionPlanTest {
     @Test
     void planSnapshotsMutableWeightTopology() {
         QwenWeights sourceWeights = weights(QwenLayerType.FULL_ATTENTION);
-        QwenExecutionPlan plan = new QwenExecutionPlan(sourceWeights);
+        QwenExecutionPlan plan = plan(sourceWeights);
 
         sourceWeights.layers()[0] = null;
         sourceWeights.config().layerTypes()[0] = QwenLayerType.GATED_DELTA_NET;
@@ -99,13 +101,13 @@ class QwenExecutionPlanTest {
 
     @Test
     void independentContextsHaveIndependentTracesAndSequenceState() throws Exception {
-        QwenExecutionPlan plan = new QwenExecutionPlan(weights(QwenLayerType.FULL_ATTENTION));
+        QwenExecutionPlan plan = plan(weights(QwenLayerType.FULL_ATTENTION));
         QwenSequenceState firstSequence = new QwenSequenceState(21L);
         QwenSequenceState secondSequence = new QwenSequenceState(22L);
-        QwenExecutionContext first =
-                new QwenExecutionContext(plan, firstSequence, QwenExecutionContext.ExecutionKind.DECODE, 0L, 1);
-        QwenExecutionContext second =
-                new QwenExecutionContext(plan, secondSequence, QwenExecutionContext.ExecutionKind.DECODE, 0L, 2);
+        QwenExecutionContext first = new QwenExecutionContext(
+                plan, firstSequence, QwenExecutionContext.ExecutionKind.DECODE, 0L, new int[] {0});
+        QwenExecutionContext second = new QwenExecutionContext(
+                plan, secondSequence, QwenExecutionContext.ExecutionKind.DECODE, 0L, new int[] {0, 1});
         QwenExecutionRunner runner = plan.newRunner();
 
         try (RunnerDriver driver = new RunnerDriver(runner)) {
@@ -130,10 +132,10 @@ class QwenExecutionPlanTest {
 
     @Test
     void cancelledContextProducesCancelledOutcomeAndTerminalState() throws Exception {
-        QwenExecutionPlan plan = new QwenExecutionPlan(weights(QwenLayerType.FULL_ATTENTION));
+        QwenExecutionPlan plan = plan(weights(QwenLayerType.FULL_ATTENTION));
         QwenSequenceState sequence = new QwenSequenceState(31L);
         QwenExecutionContext context =
-                new QwenExecutionContext(plan, sequence, QwenExecutionContext.ExecutionKind.DECODE, 0L, 1);
+                new QwenExecutionContext(plan, sequence, QwenExecutionContext.ExecutionKind.DECODE, 0L, new int[] {0});
         context.cancel();
         QwenExecutionRunner runner = plan.newRunner();
 
@@ -150,10 +152,10 @@ class QwenExecutionPlanTest {
 
     @Test
     void failedContextProducesFailedOutcomeWithOriginalFailure() throws Exception {
-        QwenExecutionPlan plan = new QwenExecutionPlan(weights(QwenLayerType.FULL_ATTENTION));
+        QwenExecutionPlan plan = plan(weights(QwenLayerType.FULL_ATTENTION));
         QwenSequenceState sequence = new QwenSequenceState(41L);
         QwenExecutionContext context =
-                new QwenExecutionContext(plan, sequence, QwenExecutionContext.ExecutionKind.DECODE, 0L, 1);
+                new QwenExecutionContext(plan, sequence, QwenExecutionContext.ExecutionKind.DECODE, 0L, new int[] {0});
         IllegalStateException failure = new IllegalStateException("synthetic execution failure");
         context.fail(failure);
         QwenExecutionRunner runner = plan.newRunner();
@@ -171,12 +173,11 @@ class QwenExecutionPlanTest {
 
     @Test
     void runnerRejectsContextBelongingToAnotherPlan() throws Exception {
-        QwenExecutionPlan runnerPlan = new QwenExecutionPlan(weights(QwenLayerType.FULL_ATTENTION));
-        QwenExecutionPlan contextPlan =
-                new QwenExecutionPlan(weights(QwenLayerType.FULL_ATTENTION, QwenLayerType.GATED_DELTA_NET));
+        QwenExecutionPlan runnerPlan = plan(weights(QwenLayerType.FULL_ATTENTION));
+        QwenExecutionPlan contextPlan = plan(weights(QwenLayerType.FULL_ATTENTION, QwenLayerType.GATED_DELTA_NET));
         QwenSequenceState sequence = new QwenSequenceState(45L);
-        QwenExecutionContext context =
-                new QwenExecutionContext(contextPlan, sequence, QwenExecutionContext.ExecutionKind.DECODE, 0L, 1);
+        QwenExecutionContext context = new QwenExecutionContext(
+                contextPlan, sequence, QwenExecutionContext.ExecutionKind.DECODE, 0L, new int[] {0});
         QwenExecutionRunner runner = runnerPlan.newRunner();
 
         try (RunnerDriver driver = new RunnerDriver(runner)) {
@@ -193,10 +194,10 @@ class QwenExecutionPlanTest {
 
     @Test
     void terminalConsumerFailureInvalidatesCapturedResultAndSequence() throws Exception {
-        QwenExecutionPlan plan = new QwenExecutionPlan(weights(QwenLayerType.FULL_ATTENTION));
+        QwenExecutionPlan plan = plan(weights(QwenLayerType.FULL_ATTENTION));
         QwenSequenceState sequence = new QwenSequenceState(46L);
         QwenExecutionContext context =
-                new QwenExecutionContext(plan, sequence, QwenExecutionContext.ExecutionKind.DECODE, 0L, 1);
+                new QwenExecutionContext(plan, sequence, QwenExecutionContext.ExecutionKind.DECODE, 0L, new int[] {0});
         IllegalStateException failure = new IllegalStateException("terminal consumer failure");
         QwenExecutionRunner runner = plan.newRunner(ignored -> {
             throw failure;
@@ -217,10 +218,10 @@ class QwenExecutionPlanTest {
 
     @Test
     void terminalConsumerRunsBeforeSequenceLeaseRelease() throws Exception {
-        QwenExecutionPlan plan = new QwenExecutionPlan(weights(QwenLayerType.FULL_ATTENTION));
+        QwenExecutionPlan plan = plan(weights(QwenLayerType.FULL_ATTENTION));
         QwenSequenceState sequence = new QwenSequenceState(48L);
         QwenExecutionContext context =
-                new QwenExecutionContext(plan, sequence, QwenExecutionContext.ExecutionKind.DECODE, 0L, 1);
+                new QwenExecutionContext(plan, sequence, QwenExecutionContext.ExecutionKind.DECODE, 0L, new int[] {0});
         QwenExecutionRunner runner = plan.newRunner(ignored -> {
             assertTrue(sequence.isExecutionClaimed());
             assertThrows(IllegalStateException.class, () -> sequence.claimExecution(1L));
@@ -245,10 +246,10 @@ class QwenExecutionPlanTest {
 
     @Test
     void cancellationRequestedByTerminalConsumerProducesCancelledOutcome() throws Exception {
-        QwenExecutionPlan plan = new QwenExecutionPlan(weights(QwenLayerType.FULL_ATTENTION));
+        QwenExecutionPlan plan = plan(weights(QwenLayerType.FULL_ATTENTION));
         QwenSequenceState sequence = new QwenSequenceState(49L);
         QwenExecutionContext context =
-                new QwenExecutionContext(plan, sequence, QwenExecutionContext.ExecutionKind.DECODE, 0L, 1);
+                new QwenExecutionContext(plan, sequence, QwenExecutionContext.ExecutionKind.DECODE, 0L, new int[] {0});
         QwenExecutionRunner runner = plan.newRunner(QwenExecutionContext::cancel);
 
         try (RunnerDriver driver = new RunnerDriver(runner)) {
@@ -266,10 +267,10 @@ class QwenExecutionPlanTest {
 
     @Test
     void terminalConsumerErrorStillCompletesFailedOutcome() throws Exception {
-        QwenExecutionPlan plan = new QwenExecutionPlan(weights(QwenLayerType.FULL_ATTENTION));
+        QwenExecutionPlan plan = plan(weights(QwenLayerType.FULL_ATTENTION));
         QwenSequenceState sequence = new QwenSequenceState(47L);
         QwenExecutionContext context =
-                new QwenExecutionContext(plan, sequence, QwenExecutionContext.ExecutionKind.DECODE, 0L, 1);
+                new QwenExecutionContext(plan, sequence, QwenExecutionContext.ExecutionKind.DECODE, 0L, new int[] {0});
         AssertionError failure = new AssertionError("terminal consumer error");
         QwenExecutionRunner runner = plan.newRunner(ignored -> {
             throw failure;
@@ -445,8 +446,21 @@ class QwenExecutionPlanTest {
                                     handle("layer-" + index + ".up"),
                                     handle("layer-" + index + ".down")));
         }
-        return new QwenWeights(
-                config(layerTypes), handle("embedding"), layers, handle("final-norm"), handle("lm-head"), null);
+        long[] embeddingShape = {32_000, 4_096};
+        TensorHandle embedding = new TensorHandle(
+                "embedding",
+                embeddingShape,
+                TensorDataType.BF16,
+                WeightFormat.Q3_G64_FP16,
+                WeightLayout.ROW_SPLIT_K128_V1,
+                2L,
+                CompactTensorLayout.expectedByteSize(
+                        embeddingShape, TensorDataType.BF16, WeightFormat.Q3_G64_FP16, WeightLayout.ROW_SPLIT_K128_V1));
+        return new QwenWeights(config(layerTypes), embedding, layers, handle("final-norm"), handle("lm-head"), null);
+    }
+
+    private static QwenExecutionPlan plan(QwenWeights weights) {
+        return new QwenExecutionPlan(weights, new NoOpQwenExecutionGpu());
     }
 
     private static QwenConfig config(QwenLayerType[] layerTypes) {
@@ -480,6 +494,38 @@ class QwenExecutionPlanTest {
 
     private static TensorHandle handle(String name) {
         return new TensorHandle(name, new long[] {1}, TensorDataType.FP32, WeightFormat.FP32, 1L, 4L);
+    }
+
+    private static final class NoOpQwenExecutionGpu implements QwenExecutionGpu {
+
+        private long nextAddress = 100L;
+
+        @Override
+        public long allocate(long byteSize) {
+            return this.nextAddress++;
+        }
+
+        @Override
+        public void copyHostToDevice(long destination, java.lang.foreign.MemorySegment source, long byteSize) {}
+
+        @Override
+        public void copyDeviceToHost(java.lang.foreign.MemorySegment destination, long source, long byteSize) {}
+
+        @Override
+        public void free(long address) {}
+
+        @Override
+        public void embedQ3(
+                long tokenIdsAddress,
+                long embeddingAddress,
+                long embeddingByteSize,
+                long hiddenStateAddress,
+                int tokenCount,
+                int vocabularySize,
+                int hiddenSize) {}
+
+        @Override
+        public void synchronize() {}
     }
 
     private static final class RunnerDriver implements AutoCloseable {

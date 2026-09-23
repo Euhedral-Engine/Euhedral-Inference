@@ -12,13 +12,15 @@
 #define EUHEDRAL_CUDA_SUCCESS 0
 #define EUHEDRAL_CUDA_INVALID_ARGUMENT (-1)
 #define EUHEDRAL_CUDA_SIZE_OVERFLOW (-2)
+#define EUHEDRAL_CUDA_FORMAT_MISMATCH (-3)
+#define EUHEDRAL_CUDA_KERNEL_UNAVAILABLE (-4)
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 EUHEDRAL_CUDA_EXPORT void* euhedral_cuda_malloc(uint64_t byte_size);
-EUHEDRAL_CUDA_EXPORT void euhedral_cuda_free(void* address);
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_free(void* address);
 EUHEDRAL_CUDA_EXPORT int euhedral_cuda_device_memory_info(uint64_t* free_byte_size, uint64_t* total_byte_size);
 
 EUHEDRAL_CUDA_EXPORT int euhedral_cuda_copy_host_to_device(
@@ -30,6 +32,17 @@ EUHEDRAL_CUDA_EXPORT int euhedral_cuda_copy_device_to_host(
         void* host_address,
         const void* device_address,
         uint64_t byte_size);
+
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_embed_q3(
+        const int32_t* device_token_ids,
+        const void* device_embedding_weights,
+        void* device_hidden_state,
+        uint32_t token_count,
+        uint32_t vocabulary_size,
+        uint32_t hidden_size,
+        uint64_t embedding_byte_size);
+
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_synchronize(void);
 
 #ifdef __cplusplus
 }

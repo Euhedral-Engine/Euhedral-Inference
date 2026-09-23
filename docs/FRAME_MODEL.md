@@ -2,9 +2,10 @@
 
 ## Scope
 
-This document defines the minimal control-plane model for scheduling Qwen inference work with
-Euhedral-Execution 0.0.7. It does not define CUDA kernels, CUDA streams, graph capture, device
-workspace allocation, KV-cache allocation, batching policy, sampling, or model-serving APIs.
+This document defines the minimal execution model for Qwen work scheduled with Euhedral-Execution
+0.0.7. The `prepare/embed` stage performs one synchronous Q3 token-embedding lookup into a
+per-submission BF16 hidden-state buffer. Transformer layers, CUDA streams, graph capture, KV-cache
+allocation, batching, sampling, and model-serving APIs remain out of scope.
 
 The selected dependency is:
 
@@ -116,9 +117,10 @@ small dependent tasks per layer.
 
 ## Runtime objects
 
-The first CPU-only skeleton for the names below is implemented in
-`core/src/main/java/io/euhedral_execution/inference/core/scheduling`. CUDA execution and the
-remaining runtime policies are intentionally deferred.
+The execution skeleton is implemented in
+`core/src/main/java/io/euhedral_execution/inference/core/scheduling`. The first real GPU operation
+is the synchronous Q3 embedding lookup; transformer-layer execution and remaining runtime policies
+are intentionally deferred.
 
 ### `QwenExecutionPlan`
 
@@ -128,11 +130,12 @@ once during construction. The plan retains that model snapshot for its lifetime 
 weights only through an immutable list view. The plan captures:
 
 - the loaded `QwenWeights`;
+- a non-owning `QwenExecutionGpu` reference for request allocations and synchronous embedding;
 - one preselected layer operation per `QwenLayerWeights` entry;
 - the reusable base pipeline builder.
 
-The current skeleton has no workspace requirements because it performs no hidden-state, logits, or CUDA
-work. Those requirements must be added with the corresponding ownership contract.
+The plan does not own request workspaces or sequence state. Each context allocates and releases its own
+hidden-state workspace while the plan retains model weights for the model lifetime.
 
 Layer selection occurs during plan construction, not on every frame. The plan binds each layer index to
 attention or GDN from the already assembled weight records. Dense and MoE FFN data remains part of the
@@ -177,13 +180,17 @@ pipeline chain in the minimal design. It references:
 - the immutable execution plan;
 - the exclusively leased sequence state;
 - execution kind (`PREFILL` or `DECODE`);
-- the input token range and starting position;
-- request-local workspace leases;
+- a copied array of input token IDs and the starting position;
+- the context-owned hidden-state workspace, allocated before embedding and retained through the terminal
+  consumer;
 - current trace state; and
-- a placeholder result record once the CPU-only pipeline reaches its terminal consumer.
+- a placeholder result record until transformer-layer execution produces logits.
 
-The context must not own model weights. Workspace leases created for a submission are released by the
-request coordinator after terminal outcome publication. If a later implementation stores a context
+The workspace contains only the BF16 hidden-state buffer sized as token count times
+`QwenConfig.hiddenSize()`. The temporary device token-ID buffer is freed by the preparation stage after
+the synchronous embedding call. The context must not own model weights or sequence-lifetime state.
+The `QwenExecutionRunner` closes the workspace after terminal outcome publication on success,
+cancellation, or failure. If a later implementation stores a context
 inside a recycled custom frame, every per-run reference and result field must be overwritten or
 cleared before reuse. A runner verifies that the context belongs to its plan before claiming sequence
 state, so a context cannot be run through a different model topology.
@@ -199,8 +206,10 @@ callback execution and outcome publication.
 
 Build the immutable pipeline after model loading:
 
-1. A preparation and embedding stage validates the sequence lease, checks cancellation, and prepares
-   the hidden-state input.
+1. A single preparation/embedding stage validates the context and compact token-embedding descriptor,
+   checks token IDs and cancellation, allocates the hidden-state workspace, uploads temporary token IDs,
+   launches Q3 lookup against the GPU-resident embedding weights, synchronizes, and leaves the hidden
+   state resident for its terminal consumer.
 2. Add one stage for every `QwenLayerWeights` entry in index order. The stage closure captures the
    preselected layer operation from `QwenExecutionPlan`.
 3. Add one final stage for final normalization and the LM head.
@@ -247,9 +256,11 @@ A stage borrows the context and its sequence lease for the duration of the callb
 only the buffers and sequence fields assigned to that request. It must not retain a pipeline frame or
 context reference after returning.
 
-Before each future CUDA launch, the stage checks request-local cancellation. A cancellation detected at
-a safe boundary uses Euhedral's shared `AbstractFrame.CANCEL_SIGNAL`, allowing the pipeline to report
-`CANCELLED` rather than a generic failure.
+The synchronous `prepare/embed` stage checks request-local cancellation before work and after the CUDA
+synchronization boundary. Temporary token IDs are freed in a `finally` path; a failure or cancellation
+also closes the context-owned hidden-state workspace. A cancellation detected at a safe boundary uses
+Euhedral's shared `AbstractFrame.CANCEL_SIGNAL`, allowing the pipeline to report `CANCELLED` rather than
+a generic failure.
 
 ### Terminal ownership
 
@@ -258,9 +269,8 @@ When the supplied callback succeeds, Euhedral publishes the raw outcome first; t
 `QwenExecutionRunner` continuation then releases the lease and completes the returned outcome future.
 If the callback throws, the context records the pending failure and clears the result; after Euhedral
 publishes `FAILED`, the continuation marks the sequence failed and releases the active lease. For
-cancellation and other stage failures, the same continuation finalizes the pending terminal state. A
-later runtime must move the complete ownership protocol into the outcome continuation when hidden-state
-buffers, CUDA events, and request-owned workspace exist:
+cancellation and other stage failures, the same continuation finalizes the pending terminal state and
+closes the context-owned workspace:
 
 - on success, it commits the new logical position and transfers the result to the caller;
 - on cancellation or failure, it rolls back or invalidates partially updated request state according
@@ -291,10 +301,12 @@ This separation avoids conditional MTP branches in every base-model stage and ke
 explicit. The exact proposal/verification loop remains outside this document because kernel and KV
 semantics have not yet been implemented.
 
-## CUDA boundary for later implementation
+## Synchronous CUDA boundary
 
-The initial frame model is explicitly synchronous: a stage is complete only when its output is safe
-for the successor to use, so a future CUDA stage must synchronize its request stream before returning.
+The frame model is explicitly synchronous: the embedding stage completes only when its output is safe
+for the successor or terminal consumer, so it synchronizes CUDA before returning. The embedding kernel
+reads the compact Q3 row-split `tokenEmbedding` directly from its existing GPU allocation and writes
+BF16 hidden-state vectors to the context workspace. It does not copy model weights to host memory.
 Simply launching asynchronous CUDA work and returning would violate the contract because
 `AbstractExecutor` immediately invokes `PipelineFrame.doFinally`, which publishes the successor.
 
@@ -305,7 +317,8 @@ ownership protocol is intentionally outside the first model.
 
 CUDA streams should be request- or sequence-owned if `fanOut` permits stages to move between CPU
 workers. A per-worker stream would require explicit cross-stream dependencies whenever a sequence
-moves. No stream ownership is selected until CUDA execution is implemented and measured.
+moves. The first embedding operation uses synchronous CUDA calls and introduces no events or deferred
+frame completion.
 
 ## Lifecycle
 
@@ -331,11 +344,11 @@ for request outcome accounting.
 
 This design does not yet specify or implement:
 
-- CUDA kernels, streams, events, or graph capture;
+- transformer-layer CUDA kernels, streams, events, or graph capture;
 - tensor-parallel, pipeline-parallel, or multi-GPU execution;
 - continuous batching or batch formation;
 - KV-cache layout, paging, eviction, or prefix reuse;
-- logits processing or sampling;
+- normalization, logits processing, or sampling;
 - MTP acceptance rules;
 - backpressure limits for inference admission;
 - public serving APIs; or

@@ -2,6 +2,7 @@ package io.euhedral_execution.inference.core.scheduling;
 
 import io.euhedral_execution.core.frames.PipelineFrame;
 import io.euhedral_execution.core.ingest.PipelineRunner;
+import io.euhedral_execution.inference.core.gpu.QwenExecutionGpu;
 import io.euhedral_execution.inference.core.model_loader.QwenWeights;
 import io.euhedral_execution.inference.core.model_loader.config.QwenConfig;
 import io.euhedral_execution.inference.core.model_loader.config.QwenLayerType;
@@ -17,7 +18,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.function.Consumer;
 
-/// Immutable, CPU-only execution definition for one loaded Qwen model.
+/// Immutable execution definition for one loaded Qwen model and its non-owning GPU runtime.
 ///
 /// The definition contains one reusable Euhedral stage for preparation, each transformer layer,
 /// final normalization/LM-head work, and terminal result capture. A transformer layer remains one
@@ -35,12 +36,14 @@ public final class QwenExecutionPlan {
     }
 
     private final QwenWeights weights;
+    private final QwenExecutionGpu gpu;
     private final List<QwenLayerWeights> layerWeights;
     private final List<LayerOperation> layerOperations;
     private final PipelineFrame.Builder<QwenExecutionContext, QwenExecutionContext> pipelineDefinition;
 
-    public QwenExecutionPlan(QwenWeights weights) {
+    public QwenExecutionPlan(QwenWeights weights, QwenExecutionGpu gpu) {
         this.weights = snapshotWeights(Objects.requireNonNull(weights, "weights"));
+        this.gpu = Objects.requireNonNull(gpu, "gpu");
         this.layerOperations = preselectLayerOperations(this.weights);
         this.layerWeights = immutableLayerView(this.weights);
         this.pipelineDefinition = buildPipeline(this.layerOperations);
@@ -48,6 +51,10 @@ public final class QwenExecutionPlan {
 
     QwenWeights weights() {
         return this.weights;
+    }
+
+    QwenExecutionGpu gpu() {
+        return this.gpu;
     }
 
     public List<QwenLayerWeights> layerWeights() {

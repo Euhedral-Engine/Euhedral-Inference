@@ -22,10 +22,13 @@ void* euhedral_cuda_malloc(uint64_t byte_size) {
     return address;
 }
 
-void euhedral_cuda_free(void* address) {
-    if (address != NULL) {
-        (void) cudaFree(address);
+int euhedral_cuda_free(void* address) {
+    if (address == NULL) {
+        return EUHEDRAL_CUDA_SUCCESS;
     }
+
+    cudaError_t status = cudaFree(address);
+    return status == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int) status;
 }
 
 int euhedral_cuda_device_memory_info(uint64_t* free_byte_size, uint64_t* total_byte_size) {
