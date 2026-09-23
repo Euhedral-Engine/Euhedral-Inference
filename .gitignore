@@ -19,3 +19,6 @@ out/
 # Native build outputs
 native/.zig-cache/
 native/zig-out/
+
+# Python tooling
+tools/__pycache__/

@@ -160,6 +160,34 @@ final class QwenArtifactCodec {
         return bytes.toByteArray();
     }
 
+    static byte[] encodeCompactTensorTable(TensorDescriptor[] tensors) throws QwenArtifactFormatException {
+        validateTensorCount(tensors);
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (DataOutputStream output = new DataOutputStream(bytes)) {
+            for (TensorDescriptor tensor : tensors) {
+                validateCompactTensor(tensor);
+                byte[] name = encodeString(tensor.name(), "tensor name");
+                output.writeInt(name.length);
+                output.write(name);
+                output.writeInt(tensor.shape().length);
+                for (long dimension : tensor.shape()) {
+                    output.writeLong(dimension);
+                }
+                output.writeInt(tensor.dataType().ordinal());
+                output.writeInt(tensor.format().ordinal());
+                output.writeInt(tensor.layout().ordinal());
+                output.writeLong(tensor.dataOffset());
+                output.writeLong(tensor.byteSize());
+            }
+        } catch (QwenArtifactFormatException exception) {
+            throw exception;
+        } catch (IOException exception) {
+            throw new AssertionError("Byte array compact tensor table encoding failed", exception);
+        }
+        validateNonOverlapping(tensors);
+        return bytes.toByteArray();
+    }
+
     static int readInt(ByteBuffer input, String field) throws QwenArtifactFormatException {
         requireRemaining(input, Integer.BYTES, field);
         return input.getInt();
@@ -348,6 +376,23 @@ final class QwenArtifactCodec {
             throw invalid("tensor data offset and byte size must be non-negative");
         }
         checkedEnd(tensor.dataOffset(), tensor.byteSize(), "tensor data");
+    }
+
+    private static void validateCompactTensor(TensorDescriptor tensor) throws QwenArtifactFormatException {
+        validateTensor(tensor);
+        if (tensor.layout() == null) {
+            throw invalid("compact tensor layout is required");
+        }
+        try {
+            long expected = CompactTensorLayout.expectedByteSize(
+                    tensor.shape(), tensor.dataType(), tensor.format(), tensor.layout());
+            if (expected != tensor.byteSize()) {
+                throw invalid("compact tensor byte size does not match its shape, format, and layout: " + tensor.name()
+                        + " expected " + expected + " but was " + tensor.byteSize());
+            }
+        } catch (IllegalArgumentException exception) {
+            throw invalid("unsupported compact tensor '" + tensor.name() + "': " + exception.getMessage());
+        }
     }
 
     private static byte[] encodeString(String value, String field) throws QwenArtifactFormatException {

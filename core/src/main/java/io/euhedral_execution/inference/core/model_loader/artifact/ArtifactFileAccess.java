@@ -7,6 +7,8 @@ import java.nio.channels.FileChannel;
 
 final class ArtifactFileAccess {
 
+    private static final long MAX_BYTE_BUFFER_CHUNK = 1L << 30;
+
     private ArtifactFileAccess() {}
 
     static void readFully(FileChannel channel, long offset, ByteBuffer destination, String field) throws IOException {
@@ -31,7 +33,7 @@ final class ArtifactFileAccess {
         long position = offset;
         long destinationOffset = 0;
         while (destinationOffset < destination.byteSize()) {
-            long chunkSize = Math.min(destination.byteSize() - destinationOffset, Integer.MAX_VALUE);
+            long chunkSize = Math.min(destination.byteSize() - destinationOffset, MAX_BYTE_BUFFER_CHUNK);
             ByteBuffer chunk = destination.asSlice(destinationOffset, chunkSize).asByteBuffer();
             readFully(channel, position, chunk, field);
             position += chunkSize;

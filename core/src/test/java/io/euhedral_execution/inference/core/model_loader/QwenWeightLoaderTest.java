@@ -1,12 +1,14 @@
 package io.euhedral_execution.inference.core.model_loader;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.euhedral_execution.inference.core.gpu.GpuMemory;
 import io.euhedral_execution.inference.core.model_loader.artifact.QwenArtifact;
+import io.euhedral_execution.inference.core.model_loader.artifact.QwenArtifactHeader;
 import io.euhedral_execution.inference.core.model_loader.artifact.TensorDescriptor;
 import io.euhedral_execution.inference.core.model_loader.config.QwenConfig;
 import io.euhedral_execution.inference.core.model_loader.config.QwenLayerType;
@@ -32,6 +34,34 @@ class QwenWeightLoaderTest {
 
     @TempDir
     Path tempDirectory;
+
+    @Test
+    void compactDispatchRequiresCompactArtifactVersion() {
+        QwenConfig config = config(0, QwenLayerType.FULL_ATTENTION, 0, 0);
+        TensorDescriptor descriptor =
+                new TensorDescriptor("text/not_compact", new long[] {1}, TensorDataType.FP32, WeightFormat.FP32, 0, 0);
+        QwenArtifactHeader rawHeader = new QwenArtifactHeader(
+                QwenArtifactHeader.MAGIC,
+                QwenArtifactHeader.VERSION,
+                QwenArtifactHeader.BYTE_SIZE,
+                0,
+                QwenArtifactHeader.BYTE_SIZE,
+                1,
+                QwenArtifactHeader.BYTE_SIZE);
+        QwenArtifactHeader compactHeader = new QwenArtifactHeader(
+                QwenArtifactHeader.MAGIC,
+                QwenArtifactHeader.COMPACT_VERSION,
+                QwenArtifactHeader.BYTE_SIZE,
+                0,
+                QwenArtifactHeader.BYTE_SIZE,
+                1,
+                QwenArtifactHeader.BYTE_SIZE);
+
+        assertFalse(QwenWeightLoader.isCompactArtifact(
+                new QwenArtifact(rawHeader, config, new TensorDescriptor[] {descriptor})));
+        assertTrue(QwenWeightLoader.isCompactArtifact(
+                new QwenArtifact(compactHeader, config, new TensorDescriptor[] {descriptor})));
+    }
 
     @Test
     void assemblesSuccessfulDenseModel() throws Exception {

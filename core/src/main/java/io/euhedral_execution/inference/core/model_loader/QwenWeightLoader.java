@@ -2,6 +2,7 @@ package io.euhedral_execution.inference.core.model_loader;
 
 import io.euhedral_execution.inference.core.gpu.GpuMemory;
 import io.euhedral_execution.inference.core.model_loader.artifact.QwenArtifact;
+import io.euhedral_execution.inference.core.model_loader.artifact.QwenArtifactHeader;
 import io.euhedral_execution.inference.core.model_loader.artifact.TensorDescriptor;
 import io.euhedral_execution.inference.core.model_loader.config.QwenConfig;
 import io.euhedral_execution.inference.core.model_loader.config.QwenLayerType;
@@ -41,6 +42,9 @@ public final class QwenWeightLoader {
         validateConfig(config);
         TensorDescriptor[] descriptors = requireDescriptors(artifact);
         Map<String, TensorDescriptor> descriptorsByName = indexDescriptors(descriptors);
+        if (isCompactArtifact(artifact)) {
+            return QwenCompactWeightLoader.load(artifactPath, artifact, gpuMemory, descriptorsByName);
+        }
         String modelPrefix = modelPrefix(descriptorsByName.keySet());
         Set<String> requiredNames = requiredNames(config, modelPrefix);
         requireAllNamesPresent(requiredNames, descriptorsByName.keySet());
@@ -69,6 +73,10 @@ public final class QwenWeightLoader {
             freeAll(handles.values(), gpuMemory, failure);
             return propagate(failure);
         }
+    }
+
+    static boolean isCompactArtifact(QwenArtifact artifact) {
+        return artifact.header() != null && artifact.header().version() == QwenArtifactHeader.COMPACT_VERSION;
     }
 
     private static QwenConfig requireConfig(QwenArtifact artifact) throws QwenWeightLoadException {

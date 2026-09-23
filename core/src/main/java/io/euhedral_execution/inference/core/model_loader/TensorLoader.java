@@ -33,6 +33,7 @@ public final class TensorLoader {
                     descriptor.shape(),
                     descriptor.dataType(),
                     descriptor.format(),
+                    descriptor.layout(),
                     deviceAddress,
                     descriptor.byteSize());
         } catch (Throwable failure) {

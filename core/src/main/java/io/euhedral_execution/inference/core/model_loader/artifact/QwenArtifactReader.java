@@ -2,13 +2,14 @@ package io.euhedral_execution.inference.core.model_loader.artifact;
 
 import io.euhedral_execution.inference.core.model_loader.layer_weights.TensorDataType;
 import io.euhedral_execution.inference.core.model_loader.layer_weights.WeightFormat;
+import io.euhedral_execution.inference.core.model_loader.layer_weights.WeightLayout;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 
-/// Reads and validates the metadata and tensor table of a version 1 Qwen artifact.
+/// Reads and validates version 1 raw and version 2 compact EDRL artifacts.
 public final class QwenArtifactReader {
 
     private QwenArtifactReader() {}
@@ -55,7 +56,7 @@ public final class QwenArtifactReader {
         if (header.magic() != QwenArtifactHeader.MAGIC) {
             throw new QwenArtifactFormatException("unsupported artifact magic");
         }
-        if (header.version() != QwenArtifactHeader.VERSION) {
+        if (header.version() != QwenArtifactHeader.VERSION && header.version() != QwenArtifactHeader.COMPACT_VERSION) {
             throw new QwenArtifactFormatException("unsupported artifact version: " + header.version());
         }
         if (header.tensorCount() < 0 || header.tensorCount() > QwenArtifactCodec.MAX_COUNT) {
@@ -111,6 +112,10 @@ public final class QwenArtifactReader {
                     cursor.readInt("tensor data type"), TensorDataType.values(), "tensor data type");
             WeightFormat format = QwenArtifactCodec.enumValue(
                     cursor.readInt("tensor weight format"), WeightFormat.values(), "tensor weight format");
+            WeightLayout layout = header.version() == QwenArtifactHeader.COMPACT_VERSION
+                    ? QwenArtifactCodec.enumValue(
+                            cursor.readInt("tensor weight layout"), WeightLayout.values(), "tensor weight layout")
+                    : null;
             long dataOffset = cursor.readLong("tensor data offset");
             long byteSize = cursor.readLong("tensor byte size");
             if (dataOffset < header.tensorDataOffset()) {
@@ -120,7 +125,21 @@ public final class QwenArtifactReader {
             if (dataEnd > fileSize) {
                 throw new QwenArtifactFormatException("tensor data extends beyond the file: " + name);
             }
-            tensors[i] = new TensorDescriptor(name, shape, dataType, format, dataOffset, byteSize);
+            tensors[i] = header.version() == QwenArtifactHeader.COMPACT_VERSION
+                    ? new TensorDescriptor(name, shape, dataType, format, layout, dataOffset, byteSize)
+                    : new TensorDescriptor(name, shape, dataType, format, dataOffset, byteSize);
+            if (header.version() == QwenArtifactHeader.COMPACT_VERSION) {
+                try {
+                    long expected = CompactTensorLayout.expectedByteSize(shape, dataType, format, layout);
+                    if (expected != byteSize) {
+                        throw new QwenArtifactFormatException(
+                                "compact tensor byte size does not match metadata: " + name);
+                    }
+                } catch (IllegalArgumentException exception) {
+                    throw new QwenArtifactFormatException(
+                            "unsupported compact tensor metadata for '" + name + "': " + exception.getMessage());
+                }
+            }
         }
         if (cursor.position() != header.tensorDataOffset()) {
             throw new QwenArtifactFormatException("tensor table has trailing or missing bytes");

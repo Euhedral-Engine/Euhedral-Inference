@@ -6,5 +6,6 @@ public enum TensorDataType {
     FP32,
     FP8_E4M3,
     UINT8,
-    INT8
+    INT8,
+    INT32
 }

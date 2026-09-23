@@ -6,6 +6,9 @@ import io.euhedral_execution.inference.core.model_loader.QwenWeights;
 import io.euhedral_execution.inference.core.model_loader.config.QwenConfig;
 import io.euhedral_execution.inference.core.model_loader.config.QwenLayerType;
 import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenAttentionWeights;
+import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenCompactAttentionWeights;
+import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenCompactGatedDeltaNetWeights;
+import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenCompactMtpAttentionWeights;
 import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenGatedDeltaNetWeights;
 import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenLayerWeights;
 import java.util.ArrayList;
@@ -97,7 +100,8 @@ public final class QwenExecutionPlan {
                 layers == null ? null : layers.clone(),
                 source.finalNorm(),
                 source.lmHead(),
-                source.mtp());
+                source.mtp(),
+                source.runtimeObjects());
     }
 
     private static List<QwenLayerWeights> immutableLayerView(QwenWeights weights) {
@@ -175,6 +179,13 @@ public final class QwenExecutionPlan {
             return QwenLayerType.FULL_ATTENTION;
         }
         if (layer.mixer() instanceof QwenGatedDeltaNetWeights) {
+            return QwenLayerType.GATED_DELTA_NET;
+        }
+        if (layer.mixer() instanceof QwenCompactAttentionWeights
+                || layer.mixer() instanceof QwenCompactMtpAttentionWeights) {
+            return QwenLayerType.FULL_ATTENTION;
+        }
+        if (layer.mixer() instanceof QwenCompactGatedDeltaNetWeights) {
             return QwenLayerType.GATED_DELTA_NET;
         }
         throw new IllegalArgumentException("Qwen layer " + index + " has an unsupported mixer");
