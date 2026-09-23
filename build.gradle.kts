@@ -1,6 +1,43 @@
 import org.gradle.api.plugins.JavaPluginExtension
+import org.gradle.api.tasks.Exec
+import org.gradle.api.tasks.SourceSetContainer
 import org.gradle.api.tasks.testing.Test
 import org.gradle.jvm.toolchain.JavaLanguageVersion
+
+val nativeBuildDirectory = layout.buildDirectory.dir("native")
+val nativeLibraryFileName = when {
+    System.getProperty("os.name").lowercase().contains("windows") -> "euhedral_cuda.dll"
+    System.getProperty("os.name").lowercase().contains("mac") -> "libeuhedral_cuda.dylib"
+    else -> "libeuhedral_cuda.so"
+}
+
+tasks.register<Exec>("nativeBuild") {
+    group = "build"
+    description = "Build the Euhedral CUDA native ABI with Zig."
+    workingDir(rootProject.file("native"))
+    doFirst {
+        val includeDirectory = providers.gradleProperty("euhedral.cuda.include-dir").orNull
+        val libraryDirectory = providers.gradleProperty("euhedral.cuda.library-dir").orNull
+        require(includeDirectory != null && libraryDirectory != null) {
+            "CUDA 13.1.x paths are required; pass " +
+                    "-Peuhedral.cuda.include-dir=/path/to/cuda/include " +
+                    "-Peuhedral.cuda.library-dir=/path/to/cuda/lib"
+        }
+        commandLine(
+                "mise",
+                "exec",
+                "--",
+                "zig",
+                "build",
+                "-Doptimize=Debug",
+                "-Dcuda-include-dir=$includeDirectory",
+                "-Dcuda-lib-dir=$libraryDirectory",
+                "--prefix",
+                nativeBuildDirectory.get().asFile.absolutePath)
+    }
+    inputs.dir(rootProject.file("native"))
+    outputs.dir(nativeBuildDirectory)
+}
 
 // Common Java configuration applied to every subproject that applies the `java` plugin.
 subprojects {
@@ -8,7 +45,39 @@ subprojects {
         the<JavaPluginExtension>().toolchain {
             languageVersion = JavaLanguageVersion.of(25)
         }
-        tasks.withType<Test>().configureEach {
+        tasks.named<Test>("test") {
+            exclude("**/CudaGpuMemoryIntegrationTest.class")
+            useJUnitPlatform()
+        }
+        val testSourceSet = the<SourceSetContainer>()["test"]
+        tasks.register<Test>("cudaIntegrationTest") {
+            group = "verification"
+            description = "Run the CUDA 13.1.x Java FFM round-trip integration test."
+            dependsOn(rootProject.tasks.named("nativeBuild"))
+            testClassesDirs = testSourceSet.output.classesDirs
+            classpath = testSourceSet.runtimeClasspath
+            include("**/CudaGpuMemoryIntegrationTest.class")
+            systemProperty(
+                    "euhedral.cuda.library",
+                    nativeBuildDirectory.get().dir("lib").file(nativeLibraryFileName).asFile.absolutePath)
+            jvmArgs("--enable-native-access=ALL-UNNAMED")
+            doFirst {
+                val libraryDirectory = providers.gradleProperty("euhedral.cuda.library-dir").orNull
+                require(libraryDirectory != null) {
+                    "CUDA 13.1.x runtime path is required; pass -Peuhedral.cuda.library-dir=/path/to/cuda/lib"
+                }
+                val pathSeparator = System.getProperty("path.separator")
+                val operatingSystem = System.getProperty("os.name").lowercase()
+                if (operatingSystem.contains("windows")) {
+                    environment(
+                            "PATH",
+                            libraryDirectory + pathSeparator + (System.getenv("PATH") ?: ""))
+                } else {
+                    environment(
+                            "LD_LIBRARY_PATH",
+                            libraryDirectory + pathSeparator + (System.getenv("LD_LIBRARY_PATH") ?: ""))
+                }
+            }
             useJUnitPlatform()
         }
     }

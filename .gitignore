@@ -15,3 +15,7 @@ out/
 
 # Logs
 *.log
+
+# Native build outputs
+native/.zig-cache/
+native/zig-out/
