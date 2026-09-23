@@ -3,10 +3,8 @@ package io.euhedral_execution.inference.core.scheduling;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.euhedral_execution.core.frames.PipelineFrame;
 import io.euhedral_execution.core.generics.AbstractExecutor;
 import io.euhedral_execution.core.impl.DefaultExecutor;
-import io.euhedral_execution.core.ingest.PipelineRunner;
 import io.euhedral_execution.inference.core.gpu.CudaGpuMemory;
 import io.euhedral_execution.inference.core.model_loader.QwenWeightLoader;
 import io.euhedral_execution.inference.core.model_loader.QwenWeights;
@@ -134,11 +132,11 @@ class QwenEmbeddingCudaIntegrationTest {
                 CudaGpuMemory.DeviceMemoryInfo resident = gpu.deviceMemoryInfo();
                 assertTrue(resident.freeBytes() > 0, "model weights did not fit on the CUDA device");
 
-                QwenExecutionPlan plan = new QwenExecutionPlan(weights, gpu);
+                QwenExecutionPlan plan = new QwenExecutionPlan(weights);
                 QwenSequenceState sequence = new QwenSequenceState(501L);
                 QwenExecutionContext context = new QwenExecutionContext(
                         plan, sequence, QwenExecutionContext.ExecutionKind.PREFILL, 0L, MODEL_TOKEN_IDS);
-                QwenExecutionRunner runner = plan.newRunner(terminalContext -> {
+                QwenExecutionRunner runner = new QwenExecutionRunner(plan, gpu, terminalContext -> {
                     QwenExecutionWorkspace workspace = terminalContext.workspace();
                     try (Arena outputArena = Arena.ofConfined()) {
                         MemorySegment hostOutput = outputArena.allocate(workspace.byteSize(), Short.BYTES);
@@ -148,10 +146,10 @@ class QwenEmbeddingCudaIntegrationTest {
                 });
 
                 try (RunnerDriver driver = new RunnerDriver(runner)) {
-                    CompletableFuture<PipelineFrame.Outcome> outcome = runner.submit(context);
-                    driver.request(weights.layers().length + 8L);
+                    CompletableFuture<QwenExecutionContext.Outcome> outcome = runner.submit(context);
+                    driver.request(1);
                     assertEquals(
-                            PipelineFrame.Status.SUCCESS,
+                            QwenExecutionContext.Status.SUCCESS,
                             outcome.get(10, TimeUnit.MINUTES).status());
                 }
 
@@ -333,12 +331,11 @@ class QwenEmbeddingCudaIntegrationTest {
 
         private RunnerDriver(QwenExecutionRunner runner) {
             this.runner = runner;
-            PipelineRunner<QwenExecutionContext> pipeline = runner.pipelineRunner();
-            this.executor.input(pipeline.getDelegate());
+            this.executor.input(runner);
         }
 
         private void request(long demand) {
-            this.runner.pipelineRunner().getDelegate().request(demand);
+            this.runner.request(demand);
         }
 
         @Override

@@ -42,6 +42,23 @@ EUHEDRAL_CUDA_EXPORT int euhedral_cuda_embed_q3(
         uint32_t hidden_size,
         uint64_t embedding_byte_size);
 
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_rms_norm_bf16(
+        const void* device_input,
+        const void* device_weight,
+        void* device_output,
+        uint32_t rows,
+        uint32_t width,
+        float epsilon);
+
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_linear_q3_bf16(
+        const void* device_input,
+        const void* device_weights,
+        void* device_output,
+        uint32_t rows,
+        uint32_t in_features,
+        uint32_t out_features,
+        uint64_t weights_byte_size);
+
 EUHEDRAL_CUDA_EXPORT int euhedral_cuda_synchronize(void);
 
 #ifdef __cplusplus

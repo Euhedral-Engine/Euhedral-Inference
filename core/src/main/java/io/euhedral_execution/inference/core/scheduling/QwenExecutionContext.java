@@ -1,73 +1,67 @@
 package io.euhedral_execution.inference.core.scheduling;
 
-import io.euhedral_execution.core.frames.AbstractFrame;
-import io.euhedral_execution.core.frames.PipelineFrame;
 import io.euhedral_execution.inference.core.gpu.QwenExecutionGpu;
-import io.euhedral_execution.inference.core.model_loader.QwenWeights;
-import io.euhedral_execution.inference.core.model_loader.artifact.CompactTensorLayout;
-import io.euhedral_execution.inference.core.model_loader.config.QwenConfig;
-import io.euhedral_execution.inference.core.model_loader.layer_weights.TensorDataType;
-import io.euhedral_execution.inference.core.model_loader.layer_weights.TensorHandle;
-import io.euhedral_execution.inference.core.model_loader.layer_weights.WeightFormat;
-import io.euhedral_execution.inference.core.model_loader.layer_weights.WeightLayout;
-import java.lang.foreign.Arena;
-import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicIntegerArray;
+import java.util.concurrent.atomic.AtomicReference;
 
-/// Per-submission state passed through the reusable Euhedral pipeline.
-///
-/// This context references model-plan and sequence state; it does not own model weights.
+/// Mutable state for one inference quantum. Frames own operations; this object owns their buffers
+/// and completion accounting, while its sequence reference retains sequence-lifetime state.
 public final class QwenExecutionContext {
+
+    private static final Throwable TERMINAL_SUCCESS = new IllegalStateException("quantum already finalized");
+    private static final Runnable NO_OP = () -> {};
 
     public enum ExecutionKind {
         PREFILL,
         DECODE
     }
 
-    public record Result(
-            ExecutionKind executionKind,
-            long sequenceId,
-            long inputStartPosition,
-            long nextTokenPosition,
-            List<String> trace) {}
+    public enum Status {
+        SUCCESS,
+        CANCELLED,
+        FAILED
+    }
+
+    public record Outcome(Status status, Throwable failure) {}
 
     private final QwenExecutionPlan plan;
-    private final QwenSequenceState sequenceState;
-    private final ExecutionKind executionKind;
-    private final long inputStartPosition;
-    private final int[] inputTokenIds;
-    private final int inputTokenCount;
-    private final List<String> executionTrace = new ArrayList<>();
-    private Throwable requestedFailure;
-    private Throwable pendingFailure;
-    private boolean pendingCancellation;
-    private QwenSequenceState.ExecutionLease executionLease;
+    private final QwenSequenceState sequence;
+    private final ExecutionKind kind;
+    private final long startPosition;
+    private final int[] tokenIds;
+    private final AtomicBoolean submitted = new AtomicBoolean();
+    private final AtomicInteger outstanding = new AtomicInteger();
+    private final AtomicReference<Throwable> failure = new AtomicReference<>();
+    private final CompletableFuture<Outcome> outcome = new CompletableFuture<>();
+    private final AtomicIntegerArray remainingDependencies;
+    private QwenSequenceState.ExecutionLease lease;
     private QwenExecutionWorkspace workspace;
     private long temporaryTokenIdsAddress;
-    private Result result;
 
     public QwenExecutionContext(
             QwenExecutionPlan plan,
-            QwenSequenceState sequenceState,
-            ExecutionKind executionKind,
-            long inputStartPosition,
-            int[] inputTokenIds) {
+            QwenSequenceState sequence,
+            ExecutionKind kind,
+            long startPosition,
+            int[] tokenIds) {
         this.plan = Objects.requireNonNull(plan, "plan");
-        this.sequenceState = Objects.requireNonNull(sequenceState, "sequenceState");
-        this.executionKind = Objects.requireNonNull(executionKind, "executionKind");
-        Objects.requireNonNull(inputTokenIds, "inputTokenIds");
-        if (inputStartPosition < 0) {
-            throw new IllegalArgumentException("inputStartPosition must be non-negative");
+        this.sequence = Objects.requireNonNull(sequence, "sequence");
+        this.kind = Objects.requireNonNull(kind, "kind");
+        Objects.requireNonNull(tokenIds, "tokenIds");
+        if (startPosition < 0 || tokenIds.length == 0) {
+            throw new IllegalArgumentException("invalid token range");
         }
-        if (inputTokenIds.length <= 0) {
-            throw new IllegalArgumentException("inputTokenIds must not be empty");
+        this.startPosition = startPosition;
+        this.tokenIds = tokenIds.clone();
+        this.remainingDependencies = new AtomicIntegerArray(plan.instructions().size());
+        for (QwenExecutionPlan.Instruction instruction : plan.instructions()) {
+            remainingDependencies.set(
+                    instruction.id(), instruction.dependencies().size());
         }
-        this.inputStartPosition = inputStartPosition;
-        this.inputTokenIds = inputTokenIds.clone();
-        this.inputTokenCount = inputTokenIds.length;
     }
 
     public QwenExecutionPlan plan() {
@@ -75,391 +69,180 @@ public final class QwenExecutionContext {
     }
 
     public QwenSequenceState sequenceState() {
-        return this.sequenceState;
-    }
-
-    public ExecutionKind executionKind() {
-        return this.executionKind;
-    }
-
-    public long inputStartPosition() {
-        return this.inputStartPosition;
+        return this.sequence;
     }
 
     public int inputTokenCount() {
-        return this.inputTokenCount;
+        return this.tokenIds.length;
     }
 
-    /// Returns a copy of the token IDs submitted with this execution.
     public int[] inputTokenIds() {
-        return this.inputTokenIds.clone();
+        return this.tokenIds.clone();
     }
 
-    /// Returns the per-submission hidden-state workspace after embedding has started.
     public QwenExecutionWorkspace workspace() {
-        if (this.workspace == null) {
-            throw new IllegalStateException("Qwen execution workspace has not been allocated");
+        QwenExecutionWorkspace current = this.workspace;
+        if (current == null) {
+            throw new IllegalStateException("workspace has not been allocated");
         }
-        return this.workspace;
+        return current;
     }
 
-    public List<String> executionTrace() {
-        return List.copyOf(this.executionTrace);
+    public CompletableFuture<Outcome> outcome() {
+        return this.outcome.copy();
     }
 
-    public Result result() {
-        return this.result;
+    CompletableFuture<Outcome> completion() {
+        return this.outcome;
     }
 
-    public boolean isTerminal() {
-        return this.result != null;
-    }
-
-    /// Requests cancellation before or during this context's pipeline execution.
     public void cancel() {
-        this.sequenceState.cancel();
+        this.sequence.cancel();
     }
 
-    /// Requests a deterministic stage failure for failure-path validation.
-    public void fail(Throwable failure) {
-        this.requestedFailure = Objects.requireNonNull(failure, "failure");
+    public void fail(Throwable cause) {
+        Objects.requireNonNull(cause, "cause");
+        if (this.failure.compareAndSet(null, cause)) return;
+        Throwable first = this.failure.get();
+        if (first != TERMINAL_SUCCESS && first != cause) first.addSuppressed(cause);
     }
 
-    QwenExecutionContext prepare(QwenExecutionPlan expectedPlan) {
-        if (this.plan != expectedPlan) {
-            throw new IllegalArgumentException("Execution context belongs to a different Qwen execution plan");
-        }
-        beginExecution();
-        this.executionTrace.add("prepare/embed");
-        try {
-            checkActive();
-            TensorHandle embedding = validateEmbedding();
-            QwenConfig config = this.plan.weights().config();
-            this.workspace = new QwenExecutionWorkspace(this.plan.gpu(), this.inputTokenCount, config.hiddenSize());
-            uploadAndEmbed(embedding, config);
-        } catch (RuntimeException | Error failure) {
-            Throwable cleanupFailure = closeSubmissionResources();
-            if (cleanupFailure != null) {
-                failure.addSuppressed(cleanupFailure);
-            }
-            throw failure;
-        }
-        return this;
+    boolean hasFailureOrCancellation() {
+        return this.failure.get() != null || this.sequence.cancellationRequested();
     }
 
-    private TensorHandle validateEmbedding() {
-        QwenWeights weights = this.plan.weights();
-        QwenConfig config = weights.config();
-        if (config == null || config.vocabSize() <= 0 || config.hiddenSize() <= 0) {
-            throw new IllegalStateException("Qwen embedding configuration is missing or invalid");
-        }
-        TensorHandle embedding = weights.tokenEmbedding();
-        if (embedding == null) {
-            throw new IllegalStateException("Qwen token embedding object is missing");
-        }
-        if (embedding.deviceAddress() == 0) {
-            throw new IllegalStateException("Qwen token embedding has no resident GPU allocation");
-        }
-        if (embedding.dataType() != TensorDataType.BF16
-                || embedding.format() != WeightFormat.Q3_G64_FP16
-                || embedding.layout() != WeightLayout.ROW_SPLIT_K128_V1) {
-            throw new IllegalArgumentException(
-                    "Qwen token embedding format/layout mismatch: expected BF16/Q3_G64_FP16/ROW_SPLIT_K128_V1");
-        }
-        long[] shape = embedding.shape();
-        if (shape == null
-                || shape.length != 2
-                || shape[0] != config.vocabSize()
-                || shape[1] != config.hiddenSize()
-                || shape[1] % 64 != 0) {
-            throw new IllegalArgumentException("Qwen token embedding shape does not match its configuration");
-        }
-        if (!weights.runtimeObjects().isEmpty()) {
-            TensorHandle loadedEmbedding = weights.runtimeObjects().get(embedding.name());
-            if (loadedEmbedding == null || loadedEmbedding.deviceAddress() != embedding.deviceAddress()) {
-                throw new IllegalStateException(
-                        "loaded Qwen token embedding object is missing from the runtime inventory");
-            }
-        }
-        long expectedByteSize;
-        try {
-            expectedByteSize = CompactTensorLayout.expectedByteSize(
-                    shape, embedding.dataType(), embedding.format(), embedding.layout());
-        } catch (IllegalArgumentException mismatch) {
-            throw new IllegalArgumentException("Qwen token embedding format/layout metadata is invalid", mismatch);
-        }
-        if (embedding.byteSize() != expectedByteSize) {
-            throw new IllegalArgumentException("Qwen token embedding byte size does not match its format/layout");
-        }
-        for (int index = 0; index < this.inputTokenIds.length; index++) {
-            int tokenId = this.inputTokenIds[index];
-            if (tokenId < 0 || tokenId >= config.vocabSize()) {
-                throw new IllegalArgumentException("input token ID at index " + index + " is outside the vocabulary");
-            }
-        }
-        return embedding;
+    Throwable failure() {
+        return this.failure.get();
     }
 
-    private void uploadAndEmbed(TensorHandle embedding, QwenConfig config) {
-        QwenExecutionGpu gpu = this.plan.gpu();
-        long tokenBytes = Math.multiplyExact((long) this.inputTokenCount, Integer.BYTES);
-        Throwable executionFailure = null;
-        try (Arena inputArena = Arena.ofConfined()) {
-            MemorySegment hostTokenIds = inputArena.allocate(tokenBytes, Integer.BYTES);
-            for (int index = 0; index < this.inputTokenCount; index++) {
-                hostTokenIds.set(ValueLayout.JAVA_INT, (long) index * Integer.BYTES, this.inputTokenIds[index]);
-            }
-            if (this.temporaryTokenIdsAddress != 0) {
-                throw new IllegalStateException("temporary token-ID buffer is already allocated");
-            }
-            this.temporaryTokenIdsAddress = gpu.allocate(tokenBytes);
-            if (this.temporaryTokenIdsAddress == 0) {
-                throw new IllegalStateException("GPU returned a null token-ID buffer address");
-            }
-            gpu.copyHostToDevice(this.temporaryTokenIdsAddress, hostTokenIds, tokenBytes);
-            gpu.embedQ3(
-                    this.temporaryTokenIdsAddress,
-                    embedding.deviceAddress(),
-                    embedding.byteSize(),
-                    this.workspace.hiddenStateAddress(),
-                    this.inputTokenCount,
-                    config.vocabSize(),
-                    config.hiddenSize());
-            gpu.synchronize();
-            checkActive();
-        } catch (RuntimeException | Error failure) {
-            executionFailure = failure;
-            throw failure;
-        } finally {
-            if (this.temporaryTokenIdsAddress != 0) {
-                try {
-                    releaseTemporaryTokenIds();
-                } catch (RuntimeException | Error cleanupFailure) {
-                    if (executionFailure == null) {
-                        throw cleanupFailure;
-                    }
-                    executionFailure.addSuppressed(cleanupFailure);
-                }
-            }
+    boolean dependencyCompleted(int instructionId) {
+        int left = this.remainingDependencies.decrementAndGet(instructionId);
+        if (left < 0) {
+            throw new IllegalStateException("instruction dependency completed twice");
         }
+        return left == 0;
     }
 
-    QwenExecutionContext executeLayer(QwenExecutionPlan.LayerOperation operation) {
-        checkActive();
-        this.executionTrace.add("layer[" + operation.index() + "]:" + operation.type());
-        return this;
+    void reserveWork() {
+        this.outstanding.incrementAndGet();
     }
 
-    QwenExecutionContext executeFinal() {
-        checkActive();
-        this.executionTrace.add("final-norm/lm-head");
-        return this;
+    boolean releaseWork() {
+        int left = this.outstanding.decrementAndGet();
+        if (left < 0) {
+            throw new IllegalStateException("work completion exceeded admission");
+        }
+        return left == 0;
     }
 
-    void captureTerminal() {
-        checkActive();
-        this.executionTrace.add("terminal-result");
-        long nextTokenPosition = this.inputStartPosition + this.inputTokenCount;
-        if (nextTokenPosition < this.inputStartPosition) {
-            abortFailure(new IllegalArgumentException("input token range overflows"));
-            throw new IllegalArgumentException("input token range overflows");
-        }
-        this.result = new Result(
-                this.executionKind,
-                this.sequenceState.sequenceId(),
-                this.inputStartPosition,
-                nextTokenPosition,
-                List.copyOf(this.executionTrace));
-    }
-
-    void checkTerminalBoundary() {
-        checkActive();
-    }
-
-    PipelineFrame.Outcome completeOutcome(PipelineFrame.Outcome outcome, Throwable observerFailure) {
-        Throwable submissionCleanupFailure = closeSubmissionResources();
-        if (observerFailure != null) {
-            if (submissionCleanupFailure != null) {
-                observerFailure.addSuppressed(submissionCleanupFailure);
-            }
-            this.result = null;
-            if (this.executionLease != null) {
-                this.sequenceState.markFailed(this.executionLease, observerFailure);
-                this.executionLease = null;
-            } else if (this.sequenceState.terminalState() == QwenSequenceState.TerminalState.ACTIVE) {
-                this.sequenceState.markFailedBeforeClaim(observerFailure);
-            }
-            this.pendingFailure = null;
-            return new PipelineFrame.Outcome(PipelineFrame.Status.FAILED, observerFailure);
-        }
-        Objects.requireNonNull(outcome, "outcome");
-        if (submissionCleanupFailure != null) {
-            Throwable failure = outcome.failure();
-            if (failure == null) {
-                failure = submissionCleanupFailure;
-            } else {
-                failure.addSuppressed(submissionCleanupFailure);
-            }
-            outcome = new PipelineFrame.Outcome(PipelineFrame.Status.FAILED, failure);
-        }
-        switch (outcome.status()) {
-            case SUCCESS -> {
-                if (this.executionLease == null) {
-                    this.result = null;
-                    return new PipelineFrame.Outcome(
-                            PipelineFrame.Status.FAILED,
-                            new IllegalStateException("Successful Qwen outcome has no active execution lease"));
-                } else if (this.pendingCancellation) {
-                    this.sequenceState.markCancelled(this.executionLease);
-                    this.executionLease = null;
-                    this.result = null;
-                    this.pendingCancellation = false;
-                    return new PipelineFrame.Outcome(PipelineFrame.Status.CANCELLED, null);
-                } else {
-                    boolean cancellationWon = this.sequenceState.releaseExecutionAndCheckCancellation(
-                            this.executionLease, this.result.nextTokenPosition());
-                    this.executionLease = null;
-                    if (cancellationWon) {
-                        this.result = null;
-                        return new PipelineFrame.Outcome(PipelineFrame.Status.CANCELLED, null);
-                    }
-                }
-                this.pendingCancellation = false;
-                return outcome;
-            }
-            case CANCELLED -> {
-                this.result = null;
-                if (this.executionLease != null) {
-                    this.sequenceState.markCancelled(this.executionLease);
-                    this.executionLease = null;
-                }
-                this.pendingCancellation = false;
-                return outcome;
-            }
-            case FAILED -> {
-                this.result = null;
-                Throwable failure = this.pendingFailure != null
-                        ? this.pendingFailure
-                        : outcome.failure() == null
-                                ? new IllegalStateException("Qwen pipeline failed without a cause")
-                                : outcome.failure();
-                if (this.executionLease != null) {
-                    this.sequenceState.markFailed(this.executionLease, failure);
-                    this.executionLease = null;
-                }
-                this.pendingFailure = null;
-                return outcome;
-            }
-            case FILTERED -> {
-                this.result = null;
-                if (this.executionLease != null) {
-                    this.sequenceState.markFailed(
-                            this.executionLease, new IllegalStateException("Qwen execution was filtered"));
-                    this.executionLease = null;
-                }
-                this.pendingFailure = null;
-                return outcome;
-            }
-        }
-        throw new IllegalStateException("Unhandled Qwen pipeline outcome: " + outcome.status());
-    }
-
-    private void beginExecution() {
-        if (this.sequenceState.cancellationRequested()) {
-            abortCancellation();
-            throw AbstractFrame.CANCEL_SIGNAL;
-        }
-        if (this.requestedFailure != null) {
-            abortFailure(this.requestedFailure);
-            throwFailure(this.requestedFailure);
-        }
-        try {
-            this.executionLease = this.sequenceState.claimExecution(this.inputStartPosition);
-        } catch (IllegalStateException failure) {
-            if (this.sequenceState.cancellationRequested()) {
-                abortCancellation();
-                throw AbstractFrame.CANCEL_SIGNAL;
-            }
-            throw failure;
-        }
-    }
-
-    private void checkActive() {
-        if (this.sequenceState.cancellationRequested()) {
-            abortCancellation();
-            throw AbstractFrame.CANCEL_SIGNAL;
-        }
-        if (this.requestedFailure != null) {
-            abortFailure(this.requestedFailure);
-            throwFailure(this.requestedFailure);
-        }
-    }
-
-    private void abortCancellation() {
-        if (this.executionLease != null) {
-            this.pendingCancellation = true;
-        } else if (this.sequenceState.terminalState() == QwenSequenceState.TerminalState.ACTIVE) {
-            this.sequenceState.markCancelledBeforeClaim();
-        }
-    }
-
-    private void abortFailure(Throwable failure) {
-        if (this.executionLease != null) {
-            this.pendingFailure = failure;
-        } else if (this.sequenceState.terminalState() == QwenSequenceState.TerminalState.ACTIVE) {
-            this.sequenceState.markFailedBeforeClaim(failure);
-        }
-    }
-
-    void invalidateAfterTerminalConsumerFailure(Throwable failure) {
-        this.result = null;
-        if (this.executionLease != null) {
-            this.pendingFailure = failure;
-        } else {
-            this.sequenceState.markFailedAfterRelease(failure);
-        }
-    }
-
-    private Throwable closeSubmissionResources() {
-        Throwable cleanupFailure = null;
-        try {
-            releaseTemporaryTokenIds();
-        } catch (Throwable failure) {
-            cleanupFailure = failure;
-        }
-        if (this.workspace != null && !this.workspace.isClosed()) {
-            try {
-                this.workspace.close();
-            } catch (Throwable failure) {
-                if (cleanupFailure == null) {
-                    cleanupFailure = failure;
-                } else if (cleanupFailure != failure) {
-                    cleanupFailure.addSuppressed(failure);
-                }
-            }
-        }
-        return cleanupFailure;
-    }
-
-    private void releaseTemporaryTokenIds() {
+    long allocateTemporaryTokenIds(QwenExecutionGpu gpu, long bytes) {
+        this.temporaryTokenIdsAddress = gpu.allocate(bytes);
         if (this.temporaryTokenIdsAddress == 0) {
+            throw new IllegalStateException("GPU returned a null token-ID address");
+        }
+        return this.temporaryTokenIdsAddress;
+    }
+
+    void releaseTemporaryTokenIds(QwenExecutionGpu gpu) {
+        if (this.temporaryTokenIdsAddress != 0) {
+            gpu.free(this.temporaryTokenIdsAddress);
+            this.temporaryTokenIdsAddress = 0;
+        }
+    }
+
+    void begin(QwenExecutionGpu gpu) {
+        begin(gpu, NO_OP);
+    }
+
+    /// Package-private hook to deterministically exercise cancellation at the lease-claim boundary.
+    void begin(QwenExecutionGpu gpu, Runnable beforeClaim) {
+        if (!this.submitted.compareAndSet(false, true)) {
+            throw new IllegalStateException("quantum was already submitted");
+        }
+        if (this.sequence.cancellationRequested()) {
+            this.outcome.complete(new Outcome(Status.CANCELLED, null));
             return;
         }
-        this.plan.gpu().free(this.temporaryTokenIdsAddress);
-        this.temporaryTokenIdsAddress = 0;
+        try {
+            long end = Math.addExact(this.startPosition, this.tokenIds.length);
+            if (end < 0) {
+                throw new IllegalArgumentException("token range overflows");
+            }
+            int vocabulary = this.plan.weights().config().vocabSize();
+            for (int index = 0; index < this.tokenIds.length; index++) {
+                if (this.tokenIds[index] < 0 || this.tokenIds[index] >= vocabulary) {
+                    throw new IllegalArgumentException("token ID outside vocabulary at index " + index);
+                }
+            }
+            beforeClaim.run();
+            try {
+                this.lease = this.sequence.claimExecution(this.startPosition);
+            } catch (IllegalStateException claimFailure) {
+                if (this.sequence.terminalState() == QwenSequenceState.TerminalState.CANCELLED) {
+                    this.outcome.complete(new Outcome(Status.CANCELLED, null));
+                    return;
+                }
+                throw claimFailure;
+            }
+            this.workspace = new QwenExecutionWorkspace(
+                    gpu, this.tokenIds.length, this.plan.weights().config().hiddenSize(), this.plan.projectionWidths());
+            this.workspace.allocateBuffers();
+        } catch (RuntimeException | Error error) {
+            fail(error);
+            finish(null, gpu);
+        }
     }
 
-    private static void throwFailure(Throwable failure) {
-        if (failure instanceof RuntimeException runtimeException) {
-            throw runtimeException;
+    /// Runs only after all admitted frames have finished and no frame can still access the buffers.
+    void finish(java.util.function.Consumer<? super QwenExecutionContext> terminalConsumer, QwenExecutionGpu gpu) {
+        if (this.outcome.isDone()) {
+            return;
         }
-        throw new QwenExecutionFailure(failure);
-    }
-
-    private static final class QwenExecutionFailure extends RuntimeException {
-
-        private QwenExecutionFailure(Throwable cause) {
-            super(cause);
+        try {
+            releaseTemporaryTokenIds(gpu);
+        } catch (Throwable cleanupFailure) {
+            fail(cleanupFailure);
         }
+        if (this.failure.get() == null && !this.sequence.cancellationRequested() && terminalConsumer != null) {
+            try {
+                terminalConsumer.accept(this);
+            } catch (Throwable consumerFailure) {
+                fail(consumerFailure);
+            }
+        }
+        if (this.workspace != null) {
+            try {
+                this.workspace.close();
+            } catch (Throwable cleanupFailure) {
+                fail(cleanupFailure);
+                try {
+                    this.workspace.close();
+                } catch (Throwable retryFailure) {
+                    fail(retryFailure);
+                }
+            }
+        }
+        Throwable error = this.failure.get();
+        if (error == null && !this.failure.compareAndSet(null, TERMINAL_SUCCESS)) {
+            error = this.failure.get();
+        }
+        Outcome completed;
+        if (error != null) {
+            if (this.lease != null) {
+                this.sequence.markFailed(this.lease, error);
+            }
+            completed = new Outcome(Status.FAILED, error);
+        } else if (this.sequence.cancellationRequested()) {
+            if (this.lease != null) {
+                this.sequence.markCancelled(this.lease);
+            }
+            completed = new Outcome(Status.CANCELLED, null);
+        } else {
+            boolean cancelled = this.sequence.releaseExecutionAndCheckCancellation(
+                    this.lease, this.startPosition + this.tokenIds.length);
+            completed = new Outcome(cancelled ? Status.CANCELLED : Status.SUCCESS, null);
+        }
+        this.lease = null;
+        this.outcome.complete(completed);
     }
 }

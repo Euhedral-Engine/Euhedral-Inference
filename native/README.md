@@ -12,7 +12,14 @@ support the target GPU. This native layer does not install or manage NVIDIA driv
 source at `share/euhedral_cuda/q3_embedding.cu` relative to the native library prefix. NVRTC compiles
 it once per process for `compute_90`, and the CUDA driver JITs that PTX for the active device.
 The operation reads model weights directly from their GPU allocation and writes BF16 hidden states;
-it supports only `Q3_G64_FP16` with `ROW_SPLIT_K128_V1`. The pipeline synchronizes before returning.
+it supports only `Q3_G64_FP16` with `ROW_SPLIT_K128_V1`. Its calling frame synchronizes before
+publishing a successor.
+
+`rms_norm_bf16.c` and `q3_linear_bf16.c` provide independent synchronous C ABI operations;
+their `.cu` files contain the kernels. `cuda_kernel_loader.c` loads their separately installed
+source assets and compiles them once per process. These operators accept opaque device addresses
+and know nothing about Euhedral frames. The Q3 linear operation consumes the same row-split Q3
+representation as embedding and writes BF16 output; RMSNorm consumes and writes BF16 rows.
 
 Build it by supplying the CUDA 13.1.x header and runtime-library directories explicitly:
 

@@ -1,217 +1,160 @@
 package io.euhedral_execution.inference.core.scheduling;
 
-import io.euhedral_execution.core.frames.PipelineFrame;
-import io.euhedral_execution.core.ingest.PipelineRunner;
-import io.euhedral_execution.inference.core.gpu.QwenExecutionGpu;
 import io.euhedral_execution.inference.core.model_loader.QwenWeights;
-import io.euhedral_execution.inference.core.model_loader.config.QwenConfig;
-import io.euhedral_execution.inference.core.model_loader.config.QwenLayerType;
-import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenAttentionWeights;
-import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenCompactAttentionWeights;
-import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenCompactGatedDeltaNetWeights;
-import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenCompactMtpAttentionWeights;
-import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenGatedDeltaNetWeights;
-import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenLayerWeights;
+import io.euhedral_execution.inference.core.model_loader.artifact.CompactTensorLayout;
+import io.euhedral_execution.inference.core.model_loader.layer_weights.TensorDataType;
+import io.euhedral_execution.inference.core.model_loader.layer_weights.TensorHandle;
+import io.euhedral_execution.inference.core.model_loader.layer_weights.WeightFormat;
+import io.euhedral_execution.inference.core.model_loader.layer_weights.WeightLayout;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
-import java.util.function.Consumer;
 
-/// Immutable execution definition for one loaded Qwen model and its non-owning GPU runtime.
-///
-/// The definition contains one reusable Euhedral stage for preparation, each transformer layer,
-/// final normalization/LM-head work, and terminal result capture. A transformer layer remains one
-/// stage even when its future implementation contains several CUDA operations.
+/// Immutable instructions and dependency edges for the implemented embedding -> norm -> projection slice.
+/// Model weights are borrowed, never owned by an inference quantum.
 public final class QwenExecutionPlan {
 
-    public record LayerOperation(int index, QwenLayerType type) {
+    public enum Kind {
+        EMBEDDING,
+        RMS_NORM,
+        Q3_LINEAR
+    }
 
-        public LayerOperation {
-            if (index < 0) {
-                throw new IllegalArgumentException("layer index must be non-negative");
+    public record Instruction(int id, Kind kind, List<Integer> dependencies, TensorHandle weight, int outputWidth) {
+        public Instruction {
+            Objects.requireNonNull(kind, "kind");
+            dependencies = List.copyOf(dependencies);
+            weight = copyHandle(Objects.requireNonNull(weight, "weight"));
+            if (id < 0 || outputWidth <= 0) {
+                throw new IllegalArgumentException("invalid instruction dimensions");
             }
-            Objects.requireNonNull(type, "type");
+        }
+
+        @Override
+        public TensorHandle weight() {
+            return copyHandle(this.weight);
         }
     }
 
     private final QwenWeights weights;
-    private final QwenExecutionGpu gpu;
-    private final List<QwenLayerWeights> layerWeights;
-    private final List<LayerOperation> layerOperations;
-    private final PipelineFrame.Builder<QwenExecutionContext, QwenExecutionContext> pipelineDefinition;
+    private final List<Instruction> instructions;
+    private final List<List<Integer>> successors;
+    private final List<Integer> projectionWidths;
 
-    public QwenExecutionPlan(QwenWeights weights, QwenExecutionGpu gpu) {
-        this.weights = snapshotWeights(Objects.requireNonNull(weights, "weights"));
-        this.gpu = Objects.requireNonNull(gpu, "gpu");
-        this.layerOperations = preselectLayerOperations(this.weights);
-        this.layerWeights = immutableLayerView(this.weights);
-        this.pipelineDefinition = buildPipeline(this.layerOperations);
+    public QwenExecutionPlan(QwenWeights weights) {
+        this(weights, null, List.of());
     }
 
-    QwenWeights weights() {
+    /// A standalone operator slice. Callers must supply semantically valid norm and projection weights;
+    /// the compact model's first-layer projections are not a complete inference graph.
+    public QwenExecutionPlan(QwenWeights weights, TensorHandle normWeight, List<TensorHandle> projections) {
+        this.weights = Objects.requireNonNull(weights, "weights");
+        Objects.requireNonNull(weights.config(), "config");
+        Objects.requireNonNull(projections, "projections");
+        int hiddenSize = weights.config().hiddenSize();
+        int vocabularySize = weights.config().vocabSize();
+        if (hiddenSize <= 0
+                || vocabularySize <= 0
+                || (normWeight == null && !projections.isEmpty())
+                || (normWeight != null && projections.isEmpty())) {
+            throw new IllegalArgumentException("invalid operator slice");
+        }
+        TensorHandle embedding = validate(weights.tokenEmbedding(), vocabularySize, hiddenSize);
+        List<Instruction> nodes = new ArrayList<>();
+        nodes.add(new Instruction(0, Kind.EMBEDDING, List.of(), embedding, hiddenSize));
+        if (normWeight != null) {
+            TensorHandle norm = validateNorm(normWeight, hiddenSize);
+            nodes.add(new Instruction(1, Kind.RMS_NORM, List.of(0), norm, hiddenSize));
+            for (TensorHandle projection : projections) {
+                Objects.requireNonNull(projection, "projection");
+                long[] shape = projection.shape();
+                if (shape == null || shape.length != 2 || shape[0] <= 0 || shape[0] > Integer.MAX_VALUE) {
+                    throw new IllegalArgumentException("invalid Q3 projection shape");
+                }
+                nodes.add(new Instruction(
+                        nodes.size(),
+                        Kind.Q3_LINEAR,
+                        List.of(1),
+                        validate(projection, shape[0], hiddenSize),
+                        Math.toIntExact(shape[0])));
+            }
+        }
+        this.instructions = List.copyOf(nodes);
+        this.projectionWidths = nodes.stream()
+                .filter(instruction -> instruction.kind() == Kind.Q3_LINEAR)
+                .map(Instruction::outputWidth)
+                .toList();
+        List<List<Integer>> edges = new ArrayList<>();
+        for (Instruction ignored : nodes) {
+            edges.add(new ArrayList<>());
+        }
+        for (Instruction instruction : nodes) {
+            for (int dependency : instruction.dependencies()) {
+                edges.get(dependency).add(instruction.id());
+            }
+        }
+        this.successors = edges.stream().map(List::copyOf).toList();
+    }
+
+    public List<Instruction> instructions() {
+        return this.instructions;
+    }
+
+    public List<Integer> successors(int instructionId) {
+        return this.successors.get(instructionId);
+    }
+
+    List<Integer> projectionWidths() {
+        return this.projectionWidths;
+    }
+
+    public QwenWeights weights() {
         return this.weights;
     }
 
-    QwenExecutionGpu gpu() {
-        return this.gpu;
-    }
-
-    public List<QwenLayerWeights> layerWeights() {
-        return this.layerWeights;
-    }
-
-    public List<LayerOperation> layerOperations() {
-        return this.layerOperations;
-    }
-
-    /// Returns the immutable Euhedral frame definition used by every runner created from this plan.
-    public PipelineFrame.Builder<QwenExecutionContext, QwenExecutionContext> pipelineDefinition() {
-        return this.pipelineDefinition;
-    }
-
-    /// Creates a runner whose terminal consumer captures the context result.
-    public QwenExecutionRunner newRunner() {
-        return newRunner(context -> {});
-    }
-
-    /// Creates a runner that captures the context result before invoking the supplied consumer.
-    public QwenExecutionRunner newRunner(Consumer<? super QwenExecutionContext> terminalConsumer) {
-        Objects.requireNonNull(terminalConsumer, "terminalConsumer");
-        PipelineRunner<QwenExecutionContext> pipelineRunner = new PipelineRunner<>(
-                this.pipelineDefinition,
-                context -> {
-                    context.captureTerminal();
-                    try {
-                        terminalConsumer.accept(context);
-                        context.checkTerminalBoundary();
-                    } catch (io.euhedral_execution.core.frames.AbstractFrame.CancelSignal cancellation) {
-                        throw cancellation;
-                    } catch (RuntimeException failure) {
-                        context.invalidateAfterTerminalConsumerFailure(failure);
-                        throw failure;
-                    } catch (Error failure) {
-                        context.invalidateAfterTerminalConsumerFailure(failure);
-                        throw new TerminalConsumerFailure(failure);
-                    }
-                },
-                true);
-        return new QwenExecutionRunner(pipelineRunner);
-    }
-
-    private static QwenWeights snapshotWeights(QwenWeights source) {
-        QwenLayerWeights[] layers = source.layers();
-        return new QwenWeights(
-                snapshotConfig(source.config()),
-                source.tokenEmbedding(),
-                layers == null ? null : layers.clone(),
-                source.finalNorm(),
-                source.lmHead(),
-                source.mtp(),
-                source.runtimeObjects());
-    }
-
-    private static List<QwenLayerWeights> immutableLayerView(QwenWeights weights) {
-        QwenLayerWeights[] layers = weights.layers();
-        return layers == null ? List.of() : List.copyOf(Arrays.asList(layers));
-    }
-
-    private static QwenConfig snapshotConfig(QwenConfig source) {
-        if (source == null) {
-            return null;
+    private static TensorHandle validateNorm(TensorHandle norm, int hiddenSize) {
+        long[] shape = norm.shape();
+        if (shape == null
+                || shape.length != 1
+                || shape[0] != hiddenSize
+                || norm.deviceAddress() == 0
+                || norm.byteSize() != (long) hiddenSize * Short.BYTES
+                || norm.dataType() != TensorDataType.BF16
+                || norm.format() != WeightFormat.BF16
+                || norm.layout() != WeightLayout.CONTIGUOUS_LE_V1) {
+            throw new IllegalArgumentException("unsupported input RMSNorm weight");
         }
-        QwenLayerType[] layerTypes = source.layerTypes();
-        return new QwenConfig(
-                source.vocabSize(),
-                source.hiddenSize(),
-                source.numHiddenLayers(),
-                source.numAttentionHeads(),
-                source.numKeyValueHeads(),
-                source.attentionHeadDim(),
-                source.intermediateSize(),
-                source.linearNumKeyHeads(),
-                source.linearNumValueHeads(),
-                source.linearKeyHeadDim(),
-                source.linearValueHeadDim(),
-                source.linearConvKernelDim(),
-                source.rmsNormEpsilon(),
-                source.ropeTheta(),
-                source.partialRotaryFactor(),
-                source.maxPositionEmbeddings(),
-                source.hiddenActivation(),
-                layerTypes == null ? null : layerTypes.clone(),
-                source.numExperts(),
-                source.numExpertsPerToken(),
-                source.moeIntermediateSize(),
-                source.sharedExpertIntermediateSize(),
-                source.tieWordEmbeddings(),
-                source.attentionOutputGate(),
-                source.mtpLayerCount());
+        return copyHandle(norm);
     }
 
-    private static List<LayerOperation> preselectLayerOperations(QwenWeights weights) {
-        if (weights.config() == null) {
-            throw new IllegalArgumentException("Qwen weights have no configuration");
+    private static TensorHandle validate(TensorHandle handle, long rows, int width) {
+        Objects.requireNonNull(handle, "weight");
+        long[] shape = handle.shape();
+        if (shape == null
+                || shape.length != 2
+                || shape[0] != rows
+                || shape[1] != width
+                || width % 64 != 0
+                || handle.deviceAddress() == 0
+                || handle.dataType() != TensorDataType.BF16
+                || handle.format() != WeightFormat.Q3_G64_FP16
+                || handle.layout() != WeightLayout.ROW_SPLIT_K128_V1
+                || handle.byteSize()
+                        != CompactTensorLayout.expectedByteSize(
+                                shape, handle.dataType(), handle.format(), handle.layout())) {
+            throw new IllegalArgumentException("unsupported Q3 weight layout or dimensions");
         }
-        if (weights.layers() == null) {
-            throw new IllegalArgumentException("Qwen weights have no transformer layers");
-        }
-        QwenLayerType[] configuredTypes = weights.config().layerTypes();
-        if (configuredTypes == null || configuredTypes.length != weights.layers().length) {
-            throw new IllegalArgumentException("Qwen layer topology does not match model configuration");
-        }
-
-        List<LayerOperation> operations = new ArrayList<>(weights.layers().length);
-        for (int index = 0; index < weights.layers().length; index++) {
-            QwenLayerWeights layer = weights.layers()[index];
-            if (layer == null) {
-                throw new IllegalArgumentException("Qwen layer " + index + " is missing");
-            }
-            if (layer.index() != index) {
-                throw new IllegalArgumentException(
-                        "Qwen layer index " + layer.index() + " is stored at position " + index);
-            }
-            QwenLayerType actualType = mixerType(layer, index);
-            if (configuredTypes[index] != actualType) {
-                throw new IllegalArgumentException("Qwen layer " + index + " is " + actualType
-                        + " but configuration declares " + configuredTypes[index]);
-            }
-            operations.add(new LayerOperation(index, actualType));
-        }
-        return List.copyOf(operations);
+        return copyHandle(handle);
     }
 
-    private static QwenLayerType mixerType(QwenLayerWeights layer, int index) {
-        if (layer.mixer() instanceof QwenAttentionWeights) {
-            return QwenLayerType.FULL_ATTENTION;
-        }
-        if (layer.mixer() instanceof QwenGatedDeltaNetWeights) {
-            return QwenLayerType.GATED_DELTA_NET;
-        }
-        if (layer.mixer() instanceof QwenCompactAttentionWeights
-                || layer.mixer() instanceof QwenCompactMtpAttentionWeights) {
-            return QwenLayerType.FULL_ATTENTION;
-        }
-        if (layer.mixer() instanceof QwenCompactGatedDeltaNetWeights) {
-            return QwenLayerType.GATED_DELTA_NET;
-        }
-        throw new IllegalArgumentException("Qwen layer " + index + " has an unsupported mixer");
-    }
-
-    private static final class TerminalConsumerFailure extends RuntimeException {
-
-        private TerminalConsumerFailure(Error cause) {
-            super("Terminal consumer failed with an Error", cause);
-        }
-    }
-
-    private PipelineFrame.Builder<QwenExecutionContext, QwenExecutionContext> buildPipeline(
-            List<LayerOperation> operations) {
-        PipelineFrame.Builder<QwenExecutionContext, QwenExecutionContext> builder =
-                PipelineFrame.<QwenExecutionContext>builder().fanOut(context -> context.prepare(this));
-        for (LayerOperation operation : operations) {
-            builder = builder.fanOut(context -> context.executeLayer(operation));
-        }
-        return builder.fanOut(QwenExecutionContext::executeFinal);
+    private static TensorHandle copyHandle(TensorHandle handle) {
+        return new TensorHandle(
+                handle.name(),
+                handle.shape().clone(),
+                handle.dataType(),
+                handle.format(),
+                handle.layout(),
+                handle.deviceAddress(),
+                handle.byteSize());
     }
 }

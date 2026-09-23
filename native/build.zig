@@ -31,6 +31,18 @@ pub fn build(b: *std.Build) void {
         .file = b.path("src/q3_embedding.c"),
         .flags = &.{"-std=c11", "-fvisibility=hidden"},
     });
+    library.root_module.addCSourceFile(.{
+        .file = b.path("src/cuda_kernel_loader.c"),
+        .flags = &.{"-std=c11", "-fvisibility=hidden"},
+    });
+    library.root_module.addCSourceFile(.{
+        .file = b.path("src/rms_norm_bf16.c"),
+        .flags = &.{"-std=c11", "-fvisibility=hidden"},
+    });
+    library.root_module.addCSourceFile(.{
+        .file = b.path("src/q3_linear_bf16.c"),
+        .flags = &.{"-std=c11", "-fvisibility=hidden"},
+    });
     library.root_module.addIncludePath(b.path("include"));
     library.root_module.addIncludePath(.{.cwd_relative = cuda_include_dir});
     library.root_module.addLibraryPath(.{.cwd_relative = cuda_lib_dir});
@@ -45,4 +57,6 @@ pub fn build(b: *std.Build) void {
     }
     b.installArtifact(library);
     b.installFile("src/q3_embedding.cu", "share/euhedral_cuda/q3_embedding.cu");
+    b.installFile("src/rms_norm_bf16.cu", "share/euhedral_cuda/rms_norm_bf16.cu");
+    b.installFile("src/q3_linear_bf16.cu", "share/euhedral_cuda/q3_linear_bf16.cu");
 }

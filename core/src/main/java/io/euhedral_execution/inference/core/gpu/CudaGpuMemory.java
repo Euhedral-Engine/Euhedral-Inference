@@ -32,6 +32,23 @@ public final class CudaGpuMemory implements QwenExecutionGpu, AutoCloseable {
             ValueLayout.JAVA_INT,
             ValueLayout.JAVA_LONG);
     private static final FunctionDescriptor SYNCHRONIZE = FunctionDescriptor.of(ValueLayout.JAVA_INT);
+    private static final FunctionDescriptor RMS_NORM_BF16 = FunctionDescriptor.of(
+            ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,
+            ValueLayout.ADDRESS,
+            ValueLayout.ADDRESS,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_FLOAT);
+    private static final FunctionDescriptor LINEAR_Q3_BF16 = FunctionDescriptor.of(
+            ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,
+            ValueLayout.ADDRESS,
+            ValueLayout.ADDRESS,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_LONG);
     private static final int CUDA_FORMAT_MISMATCH = -3;
 
     private final Arena arena;
@@ -42,6 +59,8 @@ public final class CudaGpuMemory implements QwenExecutionGpu, AutoCloseable {
     private final MethodHandle copyDeviceToHost;
     private final MethodHandle embedQ3;
     private final MethodHandle synchronize;
+    private final MethodHandle rmsNormBf16;
+    private final MethodHandle linearQ3Bf16;
     private boolean closed;
 
     public CudaGpuMemory(Path libraryPath) {
@@ -58,6 +77,8 @@ public final class CudaGpuMemory implements QwenExecutionGpu, AutoCloseable {
             this.copyDeviceToHost = bind(linker, symbols, "euhedral_cuda_copy_device_to_host", COPY);
             this.embedQ3 = bind(linker, symbols, "euhedral_cuda_embed_q3", EMBED_Q3);
             this.synchronize = bind(linker, symbols, "euhedral_cuda_synchronize", SYNCHRONIZE);
+            this.rmsNormBf16 = bind(linker, symbols, "euhedral_cuda_rms_norm_bf16", RMS_NORM_BF16);
+            this.linearQ3Bf16 = bind(linker, symbols, "euhedral_cuda_linear_q3_bf16", LINEAR_Q3_BF16);
         } catch (RuntimeException exception) {
             loadedLibraryArena.close();
             throw exception;
@@ -157,6 +178,66 @@ public final class CudaGpuMemory implements QwenExecutionGpu, AutoCloseable {
         }
         if (status != 0) {
             throw new GpuMemoryException("CUDA device synchronization", status);
+        }
+    }
+
+    @Override
+    public void rmsNormBf16(
+            long inputAddress, long weightAddress, long outputAddress, int rows, int width, float epsilon) {
+        ensureOpen();
+        requireDeviceAddress(inputAddress);
+        requireDeviceAddress(weightAddress);
+        requireDeviceAddress(outputAddress);
+        if (rows <= 0 || width <= 0 || !Float.isFinite(epsilon) || epsilon < 0) {
+            throw new IllegalArgumentException("RMS norm dimensions and epsilon are invalid");
+        }
+        int status;
+        try {
+            status = (int) rmsNormBf16.invokeExact(
+                    MemorySegment.ofAddress(inputAddress),
+                    MemorySegment.ofAddress(weightAddress),
+                    MemorySegment.ofAddress(outputAddress),
+                    rows,
+                    width,
+                    epsilon);
+        } catch (Throwable throwable) {
+            throw new GpuMemoryException("BF16 RMS norm invocation failed", throwable);
+        }
+        if (status != 0) throw new GpuMemoryException("BF16 RMS norm", status);
+    }
+
+    @Override
+    public void linearQ3Bf16(
+            long inputAddress,
+            long weightsAddress,
+            long outputAddress,
+            int rows,
+            int inFeatures,
+            int outFeatures,
+            long weightsByteSize) {
+        ensureOpen();
+        requireDeviceAddress(inputAddress);
+        requireDeviceAddress(weightsAddress);
+        requireDeviceAddress(outputAddress);
+        if (rows <= 0 || inFeatures <= 0 || outFeatures <= 0 || weightsByteSize <= 0) {
+            throw new IllegalArgumentException("Q3 linear dimensions and payload size must be positive");
+        }
+        int status;
+        try {
+            status = (int) linearQ3Bf16.invokeExact(
+                    MemorySegment.ofAddress(inputAddress),
+                    MemorySegment.ofAddress(weightsAddress),
+                    MemorySegment.ofAddress(outputAddress),
+                    rows,
+                    inFeatures,
+                    outFeatures,
+                    weightsByteSize);
+        } catch (Throwable throwable) {
+            throw new GpuMemoryException("Q3 linear invocation failed", throwable);
+        }
+        if (status != 0) {
+            String operation = status == CUDA_FORMAT_MISMATCH ? "Q3 linear format/layout mismatch" : "Q3 linear";
+            throw new GpuMemoryException(operation, status);
         }
     }
 

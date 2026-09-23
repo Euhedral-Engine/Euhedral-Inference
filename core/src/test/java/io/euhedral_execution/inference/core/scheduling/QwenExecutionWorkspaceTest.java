@@ -18,6 +18,7 @@ class QwenExecutionWorkspaceTest {
         RecordingGpuMemory gpu = new RecordingGpuMemory();
 
         QwenExecutionWorkspace workspace = new QwenExecutionWorkspace(gpu, 3, 4096);
+        workspace.allocateBuffers();
         long hiddenStateAddress = workspace.hiddenStateAddress();
 
         assertEquals(3, workspace.tokenCount());
@@ -48,6 +49,7 @@ class QwenExecutionWorkspaceTest {
     void freeFailureLeavesWorkspaceOpenForRetry() {
         RecordingGpuMemory gpu = new RecordingGpuMemory();
         QwenExecutionWorkspace workspace = new QwenExecutionWorkspace(gpu, 2, 64);
+        workspace.allocateBuffers();
         long hiddenStateAddress = workspace.hiddenStateAddress();
         gpu.freeFailuresRemaining = 1;
 

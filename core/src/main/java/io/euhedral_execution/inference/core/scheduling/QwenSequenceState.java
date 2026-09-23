@@ -235,6 +235,9 @@ public final class QwenSequenceState {
     void markCancelledBeforeClaim() {
         while (true) {
             State current = this.state.get();
+            if (current.terminalState() != TerminalState.ACTIVE) {
+                return;
+            }
             if (current.activeLease() != null) {
                 throw new IllegalStateException("Sequence execution is already claimed");
             }
