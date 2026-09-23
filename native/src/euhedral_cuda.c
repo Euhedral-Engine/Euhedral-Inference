@@ -28,6 +28,23 @@ void euhedral_cuda_free(void* address) {
     }
 }
 
+int euhedral_cuda_device_memory_info(uint64_t* free_byte_size, uint64_t* total_byte_size) {
+    if (free_byte_size == NULL || total_byte_size == NULL) {
+        return EUHEDRAL_CUDA_INVALID_ARGUMENT;
+    }
+
+    size_t free_bytes = 0;
+    size_t total_bytes = 0;
+    cudaError_t status = cudaMemGetInfo(&free_bytes, &total_bytes);
+    if (status != cudaSuccess) {
+        return (int) status;
+    }
+
+    *free_byte_size = (uint64_t) free_bytes;
+    *total_byte_size = (uint64_t) total_bytes;
+    return EUHEDRAL_CUDA_SUCCESS;
+}
+
 int euhedral_cuda_copy_host_to_device(
         void* device_address,
         const void* host_address,

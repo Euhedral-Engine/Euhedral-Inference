@@ -47,19 +47,26 @@ subprojects {
         }
         tasks.named<Test>("test") {
             exclude("**/CudaGpuMemoryIntegrationTest.class")
+            exclude("**/QwenCompactCudaResidencyIntegrationTest.class")
             useJUnitPlatform()
         }
         val testSourceSet = the<SourceSetContainer>()["test"]
         tasks.register<Test>("cudaIntegrationTest") {
             group = "verification"
-            description = "Run the CUDA 13.1.x Java FFM round-trip integration test."
+            description = "Run dedicated CUDA 13.1.x memory and model residency integration tests."
             dependsOn(rootProject.tasks.named("nativeBuild"))
             testClassesDirs = testSourceSet.output.classesDirs
             classpath = testSourceSet.runtimeClasspath
             include("**/CudaGpuMemoryIntegrationTest.class")
+            include("**/QwenCompactCudaResidencyIntegrationTest.class")
             systemProperty(
                     "euhedral.cuda.library",
                     nativeBuildDirectory.get().dir("lib").file(nativeLibraryFileName).asFile.absolutePath)
+            systemProperty(
+                    "euhedral.qwen.artifact",
+                    providers.gradleProperty("euhedral.qwen.artifact")
+                            .orElse("/mnt/shared/qwen38-quant/artifacts/qwen3_5_27b_compact_q3.edrl")
+                            .get())
             jvmArgs("--enable-native-access=ALL-UNNAMED")
             doFirst {
                 val libraryDirectory = providers.gradleProperty("euhedral.cuda.library-dir").orNull

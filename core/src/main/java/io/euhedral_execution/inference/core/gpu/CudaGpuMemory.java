@@ -18,12 +18,15 @@ public final class CudaGpuMemory implements GpuMemory, AutoCloseable {
 
     private static final FunctionDescriptor MALLOC = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.JAVA_LONG);
     private static final FunctionDescriptor FREE = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS);
+    private static final FunctionDescriptor DEVICE_MEMORY_INFO =
+            FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS);
     private static final FunctionDescriptor COPY = FunctionDescriptor.of(
             ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG);
 
     private final Arena arena;
     private final MethodHandle malloc;
     private final MethodHandle free;
+    private final MethodHandle deviceMemoryInfo;
     private final MethodHandle copyHostToDevice;
     private final MethodHandle copyDeviceToHost;
     private boolean closed;
@@ -37,6 +40,7 @@ public final class CudaGpuMemory implements GpuMemory, AutoCloseable {
             this.arena = loadedLibraryArena;
             this.malloc = bind(linker, symbols, "euhedral_cuda_malloc", MALLOC);
             this.free = bind(linker, symbols, "euhedral_cuda_free", FREE);
+            this.deviceMemoryInfo = bind(linker, symbols, "euhedral_cuda_device_memory_info", DEVICE_MEMORY_INFO);
             this.copyHostToDevice = bind(linker, symbols, "euhedral_cuda_copy_host_to_device", COPY);
             this.copyDeviceToHost = bind(linker, symbols, "euhedral_cuda_copy_device_to_host", COPY);
         } catch (RuntimeException exception) {
@@ -102,6 +106,30 @@ public final class CudaGpuMemory implements GpuMemory, AutoCloseable {
         }
     }
 
+    /// Returns the current CUDA device's free and total memory, in bytes.
+    public DeviceMemoryInfo deviceMemoryInfo() {
+        ensureOpen();
+        try (Arena queryArena = Arena.ofConfined()) {
+            MemorySegment freeBytes = queryArena.allocate(Long.BYTES, Long.BYTES);
+            MemorySegment totalBytes = queryArena.allocate(Long.BYTES, Long.BYTES);
+            int status;
+            try {
+                status = (int) deviceMemoryInfo.invokeExact(freeBytes, totalBytes);
+            } catch (Throwable throwable) {
+                throw new GpuMemoryException("CUDA device memory query invocation failed", throwable);
+            }
+            if (status != 0) {
+                throw new GpuMemoryException("CUDA device memory query", status);
+            }
+            long free = freeBytes.get(ValueLayout.JAVA_LONG, 0);
+            long total = totalBytes.get(ValueLayout.JAVA_LONG, 0);
+            if (free < 0 || total <= 0 || free > total) {
+                throw new GpuMemoryException("CUDA device memory query returned invalid byte counts");
+            }
+            return new DeviceMemoryInfo(free, total);
+        }
+    }
+
     @Override
     public void close() {
         if (!closed) {
@@ -147,4 +175,7 @@ public final class CudaGpuMemory implements GpuMemory, AutoCloseable {
             throw new IllegalArgumentException(name + " does not contain byteSize bytes");
         }
     }
+
+    /// A snapshot of device memory capacity, in bytes.
+    public record DeviceMemoryInfo(long freeBytes, long totalBytes) {}
 }
