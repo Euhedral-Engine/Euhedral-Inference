@@ -1,6 +1,6 @@
 package io.euhedral_execution.inference.core.scheduling;
 
-import io.euhedral_execution.inference.core.gpu.QwenExecutionGpu;
+import io.euhedral_execution.inference.core.gpu.ExecutionGpu;
 import io.euhedral_execution.inference.core.model_loader.QwenWeights;
 import io.euhedral_execution.inference.core.model_loader.artifact.CompactTensorLayout;
 import io.euhedral_execution.inference.core.model_loader.config.QwenConfig;
@@ -76,7 +76,7 @@ final class QwenExecutionFixtures {
                 bytes);
     }
 
-    static final class RecordingGpu implements QwenExecutionGpu {
+    static final class RecordingGpu extends ExecutionGpu {
         final AtomicLong nextAddress = new AtomicLong(1000);
         final List<Long> allocations = new ArrayList<>();
         final List<Long> frees = new ArrayList<>();

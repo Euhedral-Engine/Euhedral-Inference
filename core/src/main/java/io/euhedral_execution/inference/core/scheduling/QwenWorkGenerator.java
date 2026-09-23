@@ -3,7 +3,7 @@ package io.euhedral_execution.inference.core.scheduling;
 import io.euhedral_execution.core.frames.AbstractFrame;
 import io.euhedral_execution.core.impl.FrameFactory;
 import io.euhedral_execution.core.impl.FrameManager;
-import io.euhedral_execution.inference.core.gpu.QwenExecutionGpu;
+import io.euhedral_execution.inference.core.gpu.ExecutionGpu;
 import io.euhedral_execution.inference.core.scheduling.frames.EmbeddingFrame;
 import io.euhedral_execution.inference.core.scheduling.frames.LinearFrame;
 import io.euhedral_execution.inference.core.scheduling.frames.QwenGpuOperationFrame;
@@ -22,7 +22,7 @@ public final class QwenWorkGenerator {
     private static final long FRAME_POOL_PASSWORD = 0x5147454eL;
 
     private final QwenExecutionPlan plan;
-    private final QwenExecutionGpu gpu;
+    private final ExecutionGpu gpu;
     private final QwenExecutionRunner workQueue;
     private final Consumer<? super QwenExecutionContext> terminalConsumer;
     private final FrameManager<QwenExecutionContext, EmbeddingFrame> embeddingFrames;
@@ -37,7 +37,7 @@ public final class QwenWorkGenerator {
 
     QwenWorkGenerator(
             QwenExecutionPlan plan,
-            QwenExecutionGpu gpu,
+            ExecutionGpu gpu,
             QwenExecutionRunner workQueue,
             Consumer<? super QwenExecutionContext> terminalConsumer) {
         this.plan = Objects.requireNonNull(plan, "plan");

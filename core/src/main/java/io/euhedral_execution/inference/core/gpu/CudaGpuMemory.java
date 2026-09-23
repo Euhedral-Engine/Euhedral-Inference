@@ -1,7 +1,6 @@
 package io.euhedral_execution.inference.core.gpu;
 
 import java.lang.foreign.Arena;
-import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
@@ -14,117 +13,7 @@ import java.util.Objects;
 ///
 /// CUDA device addresses remain opaque longs. They are converted to zero-size address segments only
 /// inside the native calls and are never exposed as dereferenceable Java memory.
-public final class CudaGpuMemory implements QwenExecutionGpu, AutoCloseable {
-
-    private static final FunctionDescriptor MALLOC = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.JAVA_LONG);
-    private static final FunctionDescriptor FREE = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS);
-    private static final FunctionDescriptor DEVICE_MEMORY_INFO =
-            FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS);
-    private static final FunctionDescriptor COPY = FunctionDescriptor.of(
-            ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG);
-    private static final FunctionDescriptor EMBED_Q3 = FunctionDescriptor.of(
-            ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_LONG);
-    private static final FunctionDescriptor SYNCHRONIZE = FunctionDescriptor.of(ValueLayout.JAVA_INT);
-    private static final FunctionDescriptor RMS_NORM_BF16 = FunctionDescriptor.of(
-            ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_FLOAT);
-    private static final FunctionDescriptor RMS_NORM_UNIT_OFFSET_BF16 = RMS_NORM_BF16;
-    private static final FunctionDescriptor LINEAR_Q3_BF16 = FunctionDescriptor.of(
-            ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_LONG);
-    private static final FunctionDescriptor LINEAR_QUANTIZED_BF16 = FunctionDescriptor.of(
-            ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_LONG,
-            ValueLayout.JAVA_INT);
-    private static final FunctionDescriptor LINEAR_BF16_TO_FLOAT = FunctionDescriptor.of(
-            ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT);
-    private static final FunctionDescriptor GDN_CONTROL_FP32 = FunctionDescriptor.of(
-            ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT);
-    private static final FunctionDescriptor GDN_CONVOLUTION_BF16 = FunctionDescriptor.of(
-            ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT);
-    private static final FunctionDescriptor GDN_RECURRENCE_BF16 = FunctionDescriptor.of(
-            ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_FLOAT);
-    private static final FunctionDescriptor GDN_GATED_RMS_NORM_BF16 = FunctionDescriptor.of(
-            ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_FLOAT);
-    private static final FunctionDescriptor RESIDUAL_ADD_BF16 = FunctionDescriptor.of(
-            ValueLayout.JAVA_INT,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.ADDRESS,
-            ValueLayout.JAVA_INT,
-            ValueLayout.JAVA_INT);
-    private static final FunctionDescriptor SWIGLU_BF16 = FunctionDescriptor.of(
-            ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT);
-    private static final FunctionDescriptor ZERO_DEVICE_MEMORY =
-            FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG);
-    private static final int CUDA_FORMAT_MISMATCH = -3;
+public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
 
     private final Arena arena;
     private final MethodHandle malloc;
@@ -637,12 +526,6 @@ public final class CudaGpuMemory implements QwenExecutionGpu, AutoCloseable {
             closed = true;
             arena.close();
         }
-    }
-
-    private static MethodHandle bind(Linker linker, SymbolLookup symbols, String name, FunctionDescriptor descriptor) {
-        MemorySegment symbol =
-                symbols.find(name).orElseThrow(() -> new GpuMemoryException("native symbol not found: " + name));
-        return linker.downcallHandle(symbol, descriptor);
     }
 
     private static int invokeCopy(

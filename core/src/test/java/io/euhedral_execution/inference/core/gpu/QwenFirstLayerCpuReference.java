@@ -22,7 +22,7 @@ final class QwenFirstLayerCpuReference {
 
     private QwenFirstLayerCpuReference() {}
 
-    static Result run(QwenWeights weights, QwenExecutionGpu gpu, int tokenId) {
+    static Result run(QwenWeights weights, ExecutionGpu gpu, int tokenId) {
         QwenLayerWeights layer = weights.layers()[0];
         QwenCompactGatedDeltaNetWeights gdn = (QwenCompactGatedDeltaNetWeights) layer.mixer();
         QwenCompactDenseFfnWeights ffn = (QwenCompactDenseFfnWeights) layer.ffn();
@@ -313,7 +313,7 @@ final class QwenFirstLayerCpuReference {
         return output;
     }
 
-    private static byte[] read(QwenExecutionGpu gpu, TensorHandle handle) {
+    private static byte[] read(ExecutionGpu gpu, TensorHandle handle) {
         if (handle.byteSize() > Integer.MAX_VALUE) throw new IllegalArgumentException("reference tensor too large");
         byte[] bytes = new byte[(int) handle.byteSize()];
         try (Arena arena = Arena.ofConfined()) {
@@ -324,7 +324,7 @@ final class QwenFirstLayerCpuReference {
         return bytes;
     }
 
-    private static float[] readFp32(QwenExecutionGpu gpu, TensorHandle handle) {
+    private static float[] readFp32(ExecutionGpu gpu, TensorHandle handle) {
         byte[] bytes = read(gpu, handle);
         ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
         float[] values = new float[bytes.length / Float.BYTES];

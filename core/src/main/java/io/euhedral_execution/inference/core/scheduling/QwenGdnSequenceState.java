@@ -1,17 +1,17 @@
 package io.euhedral_execution.inference.core.scheduling;
 
-import io.euhedral_execution.inference.core.gpu.QwenExecutionGpu;
+import io.euhedral_execution.inference.core.gpu.ExecutionGpu;
 import java.util.Objects;
 
 /// Persistent GDN convolution and recurrent buffers owned by one sequence.
 public final class QwenGdnSequenceState implements AutoCloseable {
-    private final QwenExecutionGpu gpu;
+    private final ExecutionGpu gpu;
     private long convolutionStateAddress;
     private long recurrentStateAddress;
     private boolean closing;
     private boolean closed;
 
-    private QwenGdnSequenceState(QwenExecutionGpu gpu, long convolutionStateAddress, long recurrentStateAddress) {
+    private QwenGdnSequenceState(ExecutionGpu gpu, long convolutionStateAddress, long recurrentStateAddress) {
         this.gpu = gpu;
         this.convolutionStateAddress = convolutionStateAddress;
         this.recurrentStateAddress = recurrentStateAddress;
@@ -19,7 +19,7 @@ public final class QwenGdnSequenceState implements AutoCloseable {
 
     /// Allocates zero-initialized GDN state for the supplied layer geometry.
     public static QwenGdnSequenceState allocate(
-            QwenExecutionGpu gpu,
+            ExecutionGpu gpu,
             int keyHeads,
             int valueHeads,
             int keyHeadDim,
@@ -79,13 +79,13 @@ public final class QwenGdnSequenceState implements AutoCloseable {
         this.closed = true;
     }
 
-    private static long allocateRequired(QwenExecutionGpu gpu, long byteSize) {
+    private static long allocateRequired(ExecutionGpu gpu, long byteSize) {
         long address = gpu.allocate(byteSize);
         if (address <= 0) throw new IllegalStateException("GPU returned an invalid GDN state address");
         return address;
     }
 
-    private static void freeAfterFailure(QwenExecutionGpu gpu, long address, Throwable failure) {
+    private static void freeAfterFailure(ExecutionGpu gpu, long address, Throwable failure) {
         if (address == 0) return;
         try {
             gpu.free(address);

@@ -5,7 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.euhedral_execution.inference.core.gpu.QwenExecutionGpu;
+import io.euhedral_execution.inference.core.gpu.ExecutionGpu;
 import java.lang.foreign.MemorySegment;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -55,10 +55,10 @@ class QwenGdnSequenceStateTest {
 
     private static Method allocator(Class<?> stateType) {
         return assertDoesNotThrow(() -> stateType.getMethod(
-                "allocate", QwenExecutionGpu.class, int.class, int.class, int.class, int.class, int.class));
+                "allocate", ExecutionGpu.class, int.class, int.class, int.class, int.class, int.class));
     }
 
-    private static final class TrackingGpu implements QwenExecutionGpu {
+    private static final class TrackingGpu extends ExecutionGpu {
         private final List<Long> allocationSizes = new ArrayList<>();
         private final List<Long> freedAddresses = new ArrayList<>();
         private final List<Long> zeroedAddresses = new ArrayList<>();

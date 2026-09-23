@@ -1,7 +1,7 @@
 package io.euhedral_execution.inference.core.scheduling.frames;
 
 import io.euhedral_execution.core.impl.FrameManager;
-import io.euhedral_execution.inference.core.gpu.QwenExecutionGpu;
+import io.euhedral_execution.inference.core.gpu.ExecutionGpu;
 import io.euhedral_execution.inference.core.scheduling.QwenExecutionContext;
 import io.euhedral_execution.inference.core.scheduling.QwenExecutionPlan;
 import io.euhedral_execution.inference.core.scheduling.QwenWorkGenerator;
@@ -17,7 +17,7 @@ public final class EmbeddingFrame extends QwenInstructionFrame {
             FrameManager<QwenExecutionContext, EmbeddingFrame> recycler,
             QwenExecutionContext context,
             QwenExecutionPlan.Instruction instruction,
-            QwenExecutionGpu gpu,
+            ExecutionGpu gpu,
             QwenWorkGenerator generator) {
         super(idHash, recycler, context, instruction, gpu, generator);
     }

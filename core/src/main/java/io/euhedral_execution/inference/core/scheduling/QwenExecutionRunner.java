@@ -4,7 +4,7 @@ import io.euhedral_execution.core.frames.AbstractFrame;
 import io.euhedral_execution.core.generics.LatticeReceiver;
 import io.euhedral_execution.core.generics.LatticeSource;
 import io.euhedral_execution.data_structures.queues.PartitionedMpscQueue;
-import io.euhedral_execution.inference.core.gpu.QwenExecutionGpu;
+import io.euhedral_execution.inference.core.gpu.ExecutionGpu;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -20,7 +20,7 @@ public final class QwenExecutionRunner implements LatticeSource {
     private static final Function<AbstractFrame, Boolean> NEVER_STOP = ignored -> false;
 
     private final QwenExecutionPlan plan;
-    private final QwenExecutionGpu gpu;
+    private final ExecutionGpu gpu;
     private final PartitionedMpscQueue<QwenExecutionContext> ready;
     private final QwenWorkGenerator generator;
     private final AtomicInteger active = new AtomicInteger();
@@ -29,12 +29,12 @@ public final class QwenExecutionRunner implements LatticeSource {
     private final AtomicReference<LatticeReceiver> downstream = new AtomicReference<>();
     private final AtomicBoolean finished = new AtomicBoolean();
 
-    public QwenExecutionRunner(QwenExecutionPlan plan, QwenExecutionGpu gpu) {
+    public QwenExecutionRunner(QwenExecutionPlan plan, ExecutionGpu gpu) {
         this(plan, gpu, ignored -> {});
     }
 
     public QwenExecutionRunner(
-            QwenExecutionPlan plan, QwenExecutionGpu gpu, Consumer<? super QwenExecutionContext> terminalConsumer) {
+            QwenExecutionPlan plan, ExecutionGpu gpu, Consumer<? super QwenExecutionContext> terminalConsumer) {
         this.plan = Objects.requireNonNull(plan, "plan");
         this.gpu = Objects.requireNonNull(gpu, "gpu");
         this.ready = new PartitionedMpscQueue<>(plan.instructions().size(), 64);

@@ -1,6 +1,6 @@
 package io.euhedral_execution.inference.core.scheduling;
 
-import io.euhedral_execution.inference.core.gpu.QwenExecutionGpu;
+import io.euhedral_execution.inference.core.gpu.ExecutionGpu;
 import io.euhedral_execution.inference.core.model_loader.config.QwenConfig;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -139,7 +139,7 @@ public final class QwenExecutionContext {
     }
 
     /// Allocates this quantum's temporary token-ID upload buffer.
-    public long allocateTemporaryTokenIds(QwenExecutionGpu gpu, long bytes) {
+    public long allocateTemporaryTokenIds(ExecutionGpu gpu, long bytes) {
         this.temporaryTokenIdsAddress = gpu.allocate(bytes);
         if (this.temporaryTokenIdsAddress == 0) {
             throw new IllegalStateException("GPU returned a null token-ID address");
@@ -148,19 +148,19 @@ public final class QwenExecutionContext {
     }
 
     /// Releases the temporary token-ID upload buffer when its embedding instruction is finalized.
-    public void releaseTemporaryTokenIds(QwenExecutionGpu gpu) {
+    public void releaseTemporaryTokenIds(ExecutionGpu gpu) {
         if (this.temporaryTokenIdsAddress != 0) {
             gpu.free(this.temporaryTokenIdsAddress);
             this.temporaryTokenIdsAddress = 0;
         }
     }
 
-    void begin(QwenExecutionGpu gpu) {
+    void begin(ExecutionGpu gpu) {
         begin(gpu, NO_OP);
     }
 
     /// Package-private hook to deterministically exercise cancellation at the lease-claim boundary.
-    void begin(QwenExecutionGpu gpu, Runnable beforeClaim) {
+    void begin(ExecutionGpu gpu, Runnable beforeClaim) {
         if (!this.submitted.compareAndSet(false, true)) {
             throw new IllegalStateException("quantum was already submitted");
         }
@@ -204,7 +204,7 @@ public final class QwenExecutionContext {
         }
     }
 
-    private void initializeSequenceState(QwenExecutionGpu gpu) {
+    private void initializeSequenceState(ExecutionGpu gpu) {
         if (!this.plan.hasFirstLayer()) return;
         Object current = this.sequence.recurrentState();
         if (current == null) {
@@ -232,7 +232,7 @@ public final class QwenExecutionContext {
     }
 
     /// Runs only after all admitted frames have finished and no frame can still access the buffers.
-    void finish(java.util.function.Consumer<? super QwenExecutionContext> terminalConsumer, QwenExecutionGpu gpu) {
+    void finish(java.util.function.Consumer<? super QwenExecutionContext> terminalConsumer, ExecutionGpu gpu) {
         if (this.outcome.isDone()) {
             return;
         }

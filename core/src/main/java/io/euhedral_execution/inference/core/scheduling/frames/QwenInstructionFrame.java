@@ -2,7 +2,7 @@ package io.euhedral_execution.inference.core.scheduling.frames;
 
 import io.euhedral_execution.core.frames.AbstractFrame;
 import io.euhedral_execution.core.impl.FrameManager;
-import io.euhedral_execution.inference.core.gpu.QwenExecutionGpu;
+import io.euhedral_execution.inference.core.gpu.ExecutionGpu;
 import io.euhedral_execution.inference.core.scheduling.QwenExecutionContext;
 import io.euhedral_execution.inference.core.scheduling.QwenExecutionPlan;
 import io.euhedral_execution.inference.core.scheduling.QwenWorkGenerator;
@@ -11,7 +11,7 @@ import java.util.Objects;
 /// Base lifecycle for one reusable Qwen instruction frame.
 public abstract class QwenInstructionFrame extends AbstractFrame {
 
-    private final QwenExecutionGpu gpu;
+    private final ExecutionGpu gpu;
     private final QwenWorkGenerator generator;
     private QwenExecutionContext context;
     private final QwenExecutionPlan.Instruction instruction;
@@ -23,7 +23,7 @@ public abstract class QwenInstructionFrame extends AbstractFrame {
             FrameManager recycler,
             QwenExecutionContext context,
             QwenExecutionPlan.Instruction instruction,
-            QwenExecutionGpu gpu,
+            ExecutionGpu gpu,
             QwenWorkGenerator generator) {
         super(idHash, recycler, null);
         this.gpu = Objects.requireNonNull(gpu, "gpu");
@@ -52,7 +52,7 @@ public abstract class QwenInstructionFrame extends AbstractFrame {
         recycle();
     }
 
-    protected final QwenExecutionGpu gpu() {
+    protected final ExecutionGpu gpu() {
         return this.gpu;
     }
 

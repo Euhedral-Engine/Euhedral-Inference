@@ -23,13 +23,13 @@ class QwenLayerGpuOperationsIntegrationTest {
     @Test
     @Timeout(5)
     void standaloneOperationsForTheLoadedGdnLayerAreInTheGpuContract() {
-        assertDoesNotThrow(() -> QwenExecutionGpu.class.getMethod(
+        assertDoesNotThrow(() -> ExecutionGpu.class.getMethod(
                 "linearQ4Bf16", long.class, long.class, long.class, int.class, int.class, int.class, long.class));
-        assertDoesNotThrow(() -> QwenExecutionGpu.class.getMethod(
+        assertDoesNotThrow(() -> ExecutionGpu.class.getMethod(
                 "linearQ5Bf16", long.class, long.class, long.class, int.class, int.class, int.class, long.class));
-        assertDoesNotThrow(() -> QwenExecutionGpu.class.getMethod(
+        assertDoesNotThrow(() -> ExecutionGpu.class.getMethod(
                 "linearBf16ToFloat", long.class, long.class, long.class, int.class, int.class, int.class));
-        assertDoesNotThrow(() -> QwenExecutionGpu.class.getMethod(
+        assertDoesNotThrow(() -> ExecutionGpu.class.getMethod(
                 "gdnControlFp32",
                 long.class,
                 long.class,
@@ -39,7 +39,7 @@ class QwenLayerGpuOperationsIntegrationTest {
                 long.class,
                 int.class,
                 int.class));
-        assertDoesNotThrow(() -> QwenExecutionGpu.class.getMethod(
+        assertDoesNotThrow(() -> ExecutionGpu.class.getMethod(
                 "gdnConvolutionBf16",
                 long.class,
                 long.class,
@@ -51,7 +51,7 @@ class QwenLayerGpuOperationsIntegrationTest {
                 int.class,
                 int.class,
                 int.class));
-        assertDoesNotThrow(() -> QwenExecutionGpu.class.getMethod(
+        assertDoesNotThrow(() -> ExecutionGpu.class.getMethod(
                 "gdnRecurrenceBf16",
                 long.class,
                 long.class,
@@ -64,7 +64,7 @@ class QwenLayerGpuOperationsIntegrationTest {
                 int.class,
                 int.class,
                 float.class));
-        assertDoesNotThrow(() -> QwenExecutionGpu.class.getMethod(
+        assertDoesNotThrow(() -> ExecutionGpu.class.getMethod(
                 "gdnGatedRmsNormBf16",
                 long.class,
                 long.class,
@@ -74,16 +74,16 @@ class QwenLayerGpuOperationsIntegrationTest {
                 int.class,
                 int.class,
                 float.class));
-        assertDoesNotThrow(() -> QwenExecutionGpu.class.getMethod(
+        assertDoesNotThrow(() -> ExecutionGpu.class.getMethod(
                 "residualAddBf16", long.class, long.class, long.class, int.class, int.class));
         assertDoesNotThrow(
-                () -> QwenExecutionGpu.class.getMethod("swiGluBf16", long.class, long.class, int.class, int.class));
-        assertDoesNotThrow(() -> QwenExecutionGpu.class.getMethod("zeroDeviceMemory", long.class, long.class));
+                () -> ExecutionGpu.class.getMethod("swiGluBf16", long.class, long.class, int.class, int.class));
+        assertDoesNotThrow(() -> ExecutionGpu.class.getMethod("zeroDeviceMemory", long.class, long.class));
     }
 
     @Test
     void unitOffsetRmsNormMatchesIndependentCpuReference() throws Exception {
-        Method operation = assertDoesNotThrow(() -> QwenExecutionGpu.class.getMethod(
+        Method operation = assertDoesNotThrow(() -> ExecutionGpu.class.getMethod(
                 "rmsNormUnitOffsetBf16", long.class, long.class, long.class, int.class, int.class, float.class));
         int rows = 2;
         int width = 128;
