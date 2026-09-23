@@ -116,23 +116,28 @@ small dependent tasks per layer.
 
 ## Runtime objects
 
-The names below describe intended responsibilities; they are not implemented by this change.
+The first CPU-only skeleton for the names below is implemented in
+`core/src/main/java/io/euhedral_execution/inference/core/scheduling`. CUDA execution and the
+remaining runtime policies are intentionally deferred.
 
 ### `QwenExecutionPlan`
 
 An immutable plan is built once after `QwenWeights` has loaded. It owns no request state. Because
-`QwenWeights` exposes arrays, plan construction must defensively snapshot its layer array or take
-documented exclusive ownership before treating the plan as immutable. The plan captures:
+`QwenWeights` exposes arrays, the implementation snapshots the layer array and layer-type configuration
+once during construction. The plan retains that model snapshot for its lifetime and exposes layer
+weights only through an immutable list view. The plan captures:
 
 - the loaded `QwenWeights`;
 - one preselected layer operation per `QwenLayerWeights` entry;
-- the base pipeline builder;
-- an optional MTP pipeline builder when `QwenWeights.mtp()` is present; and
-- stable workspace requirements derived from the model configuration.
+- the reusable base pipeline builder.
 
-Layer selection occurs during plan construction, not on every frame. The plan binds each layer index
-to attention or GDN and dense or MoE behavior from the already assembled weight records. This avoids
-re-reading model topology in the scheduled path.
+The current skeleton has no workspace requirements because it performs no hidden-state, logits, or CUDA
+work. Those requirements must be added with the corresponding ownership contract.
+
+Layer selection occurs during plan construction, not on every frame. The plan binds each layer index to
+attention or GDN from the already assembled weight records. Dense and MoE FFN data remains part of the
+same layer's loaded weights but is not executed by this skeleton. This avoids re-reading model topology
+in the scheduled path.
 
 ### `QwenSequenceState`
 
@@ -152,9 +157,11 @@ GPU addresses remain opaque `long` values. They are never represented as derefer
 segments. Sequence state owns KV and recurrent allocations until request completion; the pooled frame
 chain does not.
 
-Only one chain may mutate a `QwenSequenceState` at a time. A later decode submission is admitted only
-after the prior outcome has published. Parallelism is across independent sequence states, not across
-dependent layers of one sequence.
+Only one chain may mutate a `QwenSequenceState` at a time. The chain receives an unforgeable execution
+lease, which is required for KV/recurrent placeholder writes and for releasing the token-position lease.
+Cancellation remains a coordinator request that may target the active chain. A later decode submission is
+admitted only after the prior outcome has published. Parallelism is across independent sequence states,
+not across dependent layers of one sequence.
 
 ### `QwenExecutionContext`
 
@@ -166,13 +173,21 @@ pipeline chain in the minimal design. It references:
 - execution kind (`PREFILL` or `DECODE`);
 - the input token range and starting position;
 - request-local workspace leases;
-- current hidden-state and logits buffer handles; and
-- the produced token or logits result once available.
+- current trace state; and
+- a placeholder result record once the CPU-only pipeline reaches its terminal consumer.
 
 The context must not own model weights. Workspace leases created for a submission are released by the
 request coordinator after terminal outcome publication. If a later implementation stores a context
 inside a recycled custom frame, every per-run reference and result field must be overwritten or
-cleared before reuse.
+cleared before reuse. A runner verifies that the context belongs to its plan before claiming sequence
+state, so a context cannot be run through a different model topology.
+
+### `QwenExecutionRunner`
+
+The skeleton wraps Euhedral's `PipelineRunner` with a submission-owner adapter. The adapter preserves
+the underlying `PipelineRunner` for scheduling, but binds sequence-lease release to the returned
+`PipelineFrame.Outcome` future. This keeps a successor from claiming the sequence between terminal
+callback execution and outcome publication.
 
 ## Pipeline construction
 
@@ -183,7 +198,9 @@ Build the immutable pipeline after model loading:
 2. Add one stage for every `QwenLayerWeights` entry in index order. The stage closure captures the
    preselected layer operation from `QwenExecutionPlan`.
 3. Add one final stage for final normalization and the LM head.
-4. Use the terminal consumer only to store the completed inference result in the context.
+4. Use the terminal consumer to capture the completed placeholder result while retaining the sequence
+   lease. `QwenExecutionRunner` releases or terminalizes that lease only after Euhedral publishes the
+   raw `PipelineFrame.Outcome`.
 
 The initial placement should use `fanOut` for computational stages. Dependencies within a chain remain
 sequential, while independent sequences may use different workers. In 0.0.7, the recycler-backed root
@@ -194,8 +211,9 @@ path from successor stages. `fanIn` should be introduced only for a measured or 
 serialization requirement, such as a resource that truly has one owner. It must not be used merely to
 express transformer layer order; the chain already expresses that order.
 
-The admission adapter calls `PipelineRunner.submit(context)`. The returned outcome future is the
-authoritative chain-completion signal. A nonblocking continuation maps:
+The admission adapter calls `QwenExecutionRunner.submit(context)`, which delegates to
+`PipelineRunner.submit(context)`. The returned outcome future is the authoritative chain-completion
+signal and the point at which the sequence lease is released. A nonblocking continuation maps:
 
 - `SUCCESS` to the result stored by the terminal consumer;
 - `CANCELLED` to request cancellation;
@@ -229,9 +247,14 @@ a safe boundary uses Euhedral's shared `AbstractFrame.CANCEL_SIGNAL`, allowing t
 
 ### Terminal ownership
 
-The terminal consumer writes the result but does not release sequence or GPU ownership. For normal
-completion, `CancelSignal`, and other caught `Exception` values, the outcome continuation is the
-terminal request coordinator:
+The current terminal consumer writes the placeholder result while retaining the sequence execution lease.
+When the supplied callback succeeds, Euhedral publishes the raw outcome first; the
+`QwenExecutionRunner` continuation then releases the lease and completes the returned outcome future.
+If the callback throws, the context records the pending failure and clears the result; after Euhedral
+publishes `FAILED`, the continuation marks the sequence failed and releases the active lease. For
+cancellation and other stage failures, the same continuation finalizes the pending terminal state. A
+later runtime must move the complete ownership protocol into the outcome continuation when hidden-state
+buffers, CUDA events, and request-owned workspace exist:
 
 - on success, it commits the new logical position and transfers the result to the caller;
 - on cancellation or failure, it rolls back or invalidates partially updated request state according
