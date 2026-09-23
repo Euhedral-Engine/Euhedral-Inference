@@ -10,6 +10,7 @@ spotless {
 }
 
 dependencies {
+    implementation(libs.euhedral.core)
     api(libs.slf4j.api)
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)
