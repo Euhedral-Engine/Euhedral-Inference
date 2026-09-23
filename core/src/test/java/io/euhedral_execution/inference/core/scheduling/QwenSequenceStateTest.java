@@ -32,6 +32,44 @@ class QwenSequenceStateTest {
     }
 
     @Test
+    void successfulSequenceClosesItsPersistentResource() {
+        var state = new QwenSequenceState(25);
+        var lease = state.claimExecution(0);
+        var recurrentState = new CloseableState();
+        state.setRecurrentState(lease, recurrentState);
+        state.releaseExecution(lease, 1);
+
+        state.complete();
+
+        assertEquals(1, recurrentState.closeCount);
+    }
+
+    @Test
+    void cancelledSequenceClosesItsPersistentResourceAfterTheActiveLease() {
+        var state = new QwenSequenceState(26);
+        var lease = state.claimExecution(0);
+        var recurrentState = new CloseableState();
+        state.setRecurrentState(lease, recurrentState);
+
+        state.cancel();
+
+        assertTrue(state.releaseExecutionAndCheckCancellation(lease, 1));
+        assertEquals(1, recurrentState.closeCount);
+    }
+
+    @Test
+    void failedSequenceClosesItsPersistentResource() {
+        var state = new QwenSequenceState(27);
+        var lease = state.claimExecution(0);
+        var recurrentState = new CloseableState();
+        state.setRecurrentState(lease, recurrentState);
+
+        state.markFailed(lease, new IllegalStateException("failure"));
+
+        assertEquals(1, recurrentState.closeCount);
+    }
+
+    @Test
     void cancellationRacingWithClaimCannotCommitPosition() throws Exception {
         var state = new QwenSequenceState(22);
         var start = new CountDownLatch(1);
@@ -99,6 +137,15 @@ class QwenSequenceStateTest {
             }
             assertEquals(1, winners);
             state.releaseExecution(winner, 1);
+        }
+    }
+
+    private static final class CloseableState implements AutoCloseable {
+        private int closeCount;
+
+        @Override
+        public void close() {
+            this.closeCount++;
         }
     }
 }

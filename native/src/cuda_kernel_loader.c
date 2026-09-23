@@ -71,8 +71,30 @@ int euhedral_cuda_load_kernel(const void* anchor, const char* source_name, const
     nvrtcResult nv_status = nvrtcCreateProgram(&program, source, source_name, 0, NULL, NULL);
     free(source);
     if (nv_status != NVRTC_SUCCESS) return EUHEDRAL_CUDA_KERNEL_UNAVAILABLE;
-    const char* options[] = {"--std=c++14", "--gpu-architecture=compute_90"};
-    nv_status = nvrtcCompileProgram(program, 2, options);
+    const char* include_directory = getenv("EUHEDRAL_CUDA_INCLUDE_DIR");
+    char include_option[PATH_MAX + 16];
+    char home_include[PATH_MAX];
+    if (include_directory == NULL || include_directory[0] == '\0') {
+        const char* cuda_home = getenv("CUDA_HOME");
+        if (cuda_home == NULL || cuda_home[0] == '\0') cuda_home = getenv("CUDA_PATH");
+        if (cuda_home != NULL && cuda_home[0] != '\0') {
+            int home_length = snprintf(home_include, sizeof(home_include), "%s/include", cuda_home);
+            if (home_length < 0 || (size_t)home_length >= sizeof(home_include)) {
+                nvrtcDestroyProgram(&program);
+                return EUHEDRAL_CUDA_KERNEL_UNAVAILABLE;
+            }
+            include_directory = home_include;
+        } else {
+            include_directory = "/usr/local/cuda/include";
+        }
+    }
+    int include_length = snprintf(include_option, sizeof(include_option), "-I%s", include_directory);
+    if (include_length < 0 || (size_t)include_length >= sizeof(include_option)) {
+        nvrtcDestroyProgram(&program);
+        return EUHEDRAL_CUDA_KERNEL_UNAVAILABLE;
+    }
+    const char* options[] = {"--std=c++14", "--gpu-architecture=compute_90", include_option};
+    nv_status = nvrtcCompileProgram(program, 3, options);
     if (nv_status != NVRTC_SUCCESS) {
         size_t log_size = 0;
         nvrtcGetProgramLogSize(program, &log_size);

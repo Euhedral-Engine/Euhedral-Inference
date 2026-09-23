@@ -28,8 +28,8 @@ static BOOL CALLBACK initialize_once(PINIT_ONCE state, PVOID parameter, PVOID* c
 }
 #endif
 
-int euhedral_cuda_rms_norm_bf16(const void* input, const void* weight, void* output,
-        uint32_t rows, uint32_t width, float epsilon) {
+static int rms_norm_bf16_with_offset(const void* input, const void* weight, void* output,
+        uint32_t rows, uint32_t width, float epsilon, float weight_offset) {
     if (input == NULL || weight == NULL || output == NULL || rows == 0 || width == 0 || !isfinite(epsilon) || epsilon < 0.0f)
         return EUHEDRAL_CUDA_INVALID_ARGUMENT;
     int context_status = euhedral_cuda_bind_thread_context();
@@ -43,9 +43,19 @@ int euhedral_cuda_rms_norm_bf16(const void* input, const void* weight, void* out
     CUdeviceptr input_ptr = (CUdeviceptr)(uintptr_t)input, weight_ptr = (CUdeviceptr)(uintptr_t)weight;
     CUdeviceptr output_ptr = (CUdeviceptr)(uintptr_t)output;
     unsigned int rows_arg = rows, width_arg = width;
-    void* params[] = {&input_ptr, &weight_ptr, &output_ptr, &rows_arg, &width_arg, &epsilon};
+    void* params[] = {&input_ptr, &weight_ptr, &output_ptr, &rows_arg, &width_arg, &epsilon, &weight_offset};
     CUresult status = cuLaunchKernel(function, rows, 1, 1, 128, 1, 1, 0, NULL, params, NULL);
     if (status != CUDA_SUCCESS) return (int)status;
     cudaError_t sync = cudaDeviceSynchronize();
     return sync == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int)sync;
+}
+
+int euhedral_cuda_rms_norm_bf16(const void* input, const void* weight, void* output,
+        uint32_t rows, uint32_t width, float epsilon) {
+    return rms_norm_bf16_with_offset(input, weight, output, rows, width, epsilon, 0.0f);
+}
+
+int euhedral_cuda_rms_norm_unit_offset_bf16(const void* input, const void* weight, void* output,
+        uint32_t rows, uint32_t width, float epsilon) {
+    return rms_norm_bf16_with_offset(input, weight, output, rows, width, epsilon, 1.0f);
 }

@@ -6,7 +6,7 @@ import io.euhedral_execution.inference.core.scheduling.QwenExecutionContext;
 import io.euhedral_execution.inference.core.scheduling.QwenExecutionPlan;
 import io.euhedral_execution.inference.core.scheduling.QwenWorkGenerator;
 
-/// Runs one independent Q3 projection over the normalized BF16 input.
+/// Runs one independent quantized or BF16 projection instruction.
 public final class LinearFrame extends QwenInstructionFrame {
 
     public LinearFrame(
@@ -21,13 +21,51 @@ public final class LinearFrame extends QwenInstructionFrame {
 
     @Override
     protected void perform(QwenExecutionContext context, QwenExecutionPlan.Instruction instruction) {
-        gpu().linearQ3Bf16(
-                        context.workspace().normalizedStateAddress(),
-                        instruction.weightAddress(),
-                        context.workspace().projectionAddress(instruction.id() - 2),
-                        context.inputTokenCount(),
-                        context.plan().weights().config().hiddenSize(),
-                        instruction.outputWidth(),
-                        instruction.weightByteSize());
+        long input = context.plan().hasFirstLayer()
+                ? context.workspace().address(instruction.inputBuffers().getFirst())
+                : context.workspace().normalizedStateAddress();
+        long output = context.plan().hasFirstLayer()
+                ? context.workspace().address(instruction.outputBuffers().getFirst())
+                : context.workspace().projectionAddress(instruction.outputBufferIndex());
+        switch (instruction.kind()) {
+            case Q3_LINEAR ->
+                gpu().linearQ3Bf16(
+                                input,
+                                instruction.weightAddress(),
+                                output,
+                                context.inputTokenCount(),
+                                instruction.inputWidth(),
+                                instruction.outputWidth(),
+                                instruction.weightByteSize());
+            case Q4_LINEAR ->
+                gpu().linearQ4Bf16(
+                                input,
+                                instruction.weightAddress(),
+                                output,
+                                context.inputTokenCount(),
+                                instruction.inputWidth(),
+                                instruction.outputWidth(),
+                                instruction.weightByteSize());
+            case Q5_LINEAR ->
+                gpu().linearQ5Bf16(
+                                input,
+                                instruction.weightAddress(),
+                                output,
+                                context.inputTokenCount(),
+                                instruction.inputWidth(),
+                                instruction.outputWidth(),
+                                instruction.weightByteSize());
+            case BF16_LINEAR ->
+                gpu().linearBf16ToFloat(
+                                input,
+                                instruction.weightAddress(),
+                                output,
+                                context.inputTokenCount(),
+                                instruction.inputWidth(),
+                                instruction.outputWidth());
+            default ->
+                throw new IllegalArgumentException(
+                        "linear frame received non-linear instruction: " + instruction.kind());
+        }
     }
 }

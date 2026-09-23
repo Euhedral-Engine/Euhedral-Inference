@@ -50,6 +50,14 @@ EUHEDRAL_CUDA_EXPORT int euhedral_cuda_rms_norm_bf16(
         uint32_t width,
         float epsilon);
 
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_rms_norm_unit_offset_bf16(
+        const void* device_input,
+        const void* device_weight,
+        void* device_output,
+        uint32_t rows,
+        uint32_t width,
+        float epsilon);
+
 EUHEDRAL_CUDA_EXPORT int euhedral_cuda_linear_q3_bf16(
         const void* device_input,
         const void* device_weights,
@@ -58,6 +66,84 @@ EUHEDRAL_CUDA_EXPORT int euhedral_cuda_linear_q3_bf16(
         uint32_t in_features,
         uint32_t out_features,
         uint64_t weights_byte_size);
+
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_linear_quantized_bf16(
+        const void* device_input,
+        const void* device_weights,
+        void* device_output,
+        uint32_t rows,
+        uint32_t in_features,
+        uint32_t out_features,
+        uint64_t weights_byte_size,
+        uint32_t bits);
+
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_linear_bf16_to_float(
+        const void* device_input,
+        const void* device_weights,
+        void* device_output,
+        uint32_t rows,
+        uint32_t in_features,
+        uint32_t out_features);
+
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_gdn_control_fp32(
+        const float* device_a_projection,
+        const float* device_b_projection,
+        const float* device_a_log,
+        const float* device_dt_bias,
+        float* device_g_output,
+        float* device_beta_output,
+        uint32_t rows,
+        uint32_t heads);
+
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_gdn_convolution_bf16(
+        const void* device_query_key,
+        const void* device_value_z,
+        const void* device_convolution_weights,
+        void* device_convolution_state,
+        void* device_output,
+        uint32_t rows,
+        uint32_t query_key_width,
+        uint32_t value_width,
+        uint32_t convolution_width,
+        uint32_t kernel_size);
+
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_gdn_recurrence_bf16(
+        const void* device_convolved,
+        const float* device_g,
+        const float* device_beta,
+        float* device_recurrent_state,
+        void* device_output,
+        uint32_t rows,
+        uint32_t key_heads,
+        uint32_t value_heads,
+        uint32_t key_head_dim,
+        uint32_t value_head_dim,
+        float output_scale);
+
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_gdn_gated_rms_norm_bf16(
+        const void* device_recurrent,
+        const void* device_value_z,
+        const void* device_norm_weight,
+        void* device_output,
+        uint32_t rows,
+        uint32_t value_heads,
+        uint32_t head_dim,
+        float epsilon);
+
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_residual_add_bf16(
+        const void* device_residual,
+        const void* device_delta,
+        void* device_output,
+        uint32_t rows,
+        uint32_t width);
+
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_swiglu_bf16(
+        const void* device_gate_up,
+        void* device_output,
+        uint32_t rows,
+        uint32_t intermediate_size);
+
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_zero_device_memory(void* device_address, uint64_t byte_size);
 
 EUHEDRAL_CUDA_EXPORT int euhedral_cuda_synchronize(void);
 

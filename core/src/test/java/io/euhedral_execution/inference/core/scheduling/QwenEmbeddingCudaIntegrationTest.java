@@ -132,7 +132,7 @@ class QwenEmbeddingCudaIntegrationTest {
                 CudaGpuMemory.DeviceMemoryInfo resident = gpu.deviceMemoryInfo();
                 assertTrue(resident.freeBytes() > 0, "model weights did not fit on the CUDA device");
 
-                QwenExecutionPlan plan = new QwenExecutionPlan(weights);
+                QwenExecutionPlan plan = QwenExecutionPlan.embeddingOnly(weights);
                 QwenSequenceState sequence = new QwenSequenceState(501L);
                 QwenExecutionContext context = new QwenExecutionContext(
                         plan, sequence, QwenExecutionContext.ExecutionKind.PREFILL, 0L, MODEL_TOKEN_IDS);

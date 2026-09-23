@@ -31,12 +31,13 @@ transformer-layer control loop.
 ## Instruction availability
 
 The concrete `EmbeddingFrame`, `RmsNormFrame`, and `LinearFrame` each live in their own source file
-under `scheduling/frames`. A quantum initially queues its embedding operation context. Each frame
-invokes a standalone CUDA operation and synchronizes before reporting completion. `QwenWorkGenerator`
-follows precomputed successor edges only; it decrements dependency counters and queues each newly
-ready operation context. It does not walk the full model or call a layer method that drives the next
-operation. Independent projections from one normalized activation receive separate `LinearFrame`
-instances and output buffers.
+under `scheduling/frames`. `QwenGpuOperationFrame` handles reusable control, recurrent, elementwise,
+residual, and activation instructions. A quantum initially queues its embedding operation context.
+Each frame invokes a standalone CUDA operation and synchronizes before reporting completion.
+`QwenWorkGenerator` follows precomputed successor edges only; it decrements dependency counters and
+queues each newly ready operation context. It does not walk the full model or call a layer method that
+drives the next operation. Independent projections from one normalized activation receive separate
+`LinearFrame` instances and output buffers.
 
 ```text
 embedding output -> RmsNormFrame -> LinearFrame (projection A)
@@ -50,7 +51,7 @@ own reservation through fan-out; inline execution therefore cannot finalize a wo
 sibling instruction remains pending. CUDA operations do not import Euhedral types.
 
 `QwenWorkGenerator` owns a Euhedral `FrameManager` for each fixed instruction: this keeps a linear
-frame's weight binding immutable even when several `LinearFrame` instructions exist. Checkout passes
+or GPU-operation frame's weight binding immutable even when several instructions exist. Checkout passes
 only the new quantum context; no per-checkout wrapper or instruction copy is created. `getOrCreate`
 runs only on the serialized `pull`/`request` path, so there is no manager lock on frame checkout.
 Successful and failed finalization enqueue successor contexts, clear the completed quantum reference,
@@ -60,10 +61,16 @@ Reuse is best-effort when its bounded pool is full; execution does not depend on
 Frame references expire at finalization: callers must not retain or invoke a recycled frame, since the
 manager can issue the same object for another quantum.
 
-The default compact-model plan currently performs embedding only. The explicit norm/projection
-constructor is an operator slice for verified, semantically matched inputs; it is not a claim that
-an incomplete transformer layer or a first-layer FFN projection can run directly after embedding.
-A full model plan requires genuine attention/GDN/FFN dependencies and corresponding operators.
+For the compact Qwen3.5 artifact, `new QwenExecutionPlan(weights)` inspects the actual loaded layer-zero
+`QwenLayerWeights`. It rejects a topology that is not the loaded GDN form and publishes the complete
+17-instruction graph: embedding, unit-offset input RMSNorm, independent Q4 query/key, Q5 value/z, and
+BF16 control projections, GDN control/convolution/recurrent/gated-normalization operations, mixer
+projection, residual, post-mixer RMSNorm, Q3 gate/up, SwiGLU, Q3 down, and the final residual. The
+projection branches share only their immutable normalized-input dependency and write distinct buffers.
+`QwenGdnSequenceState` owns the persistent convolution tail and FP32 recurrent matrix; the submission
+workspace owns only transient activation buffers. Sequence state is closed on completion, cancellation,
+or failure, after no frame can still access it. The explicit norm/projection constructor remains a
+low-level operator slice for existing tests and does not construct a synthetic transformer layer.
 
 ## Completion boundary
 
@@ -86,12 +93,12 @@ uses the same resource-safe graceful behavior. An executor abandoned by an uncau
 permanently unavailable scheduler can leave a quantum pending; neither case can safely free buffers
 can still be in use. Fatal shutdown and forced abandonment require a separate ownership policy.
 
-The native RMSNorm and Q3-linear wrappers bind the calling worker to its CUDA device before their
-first kernel load and before each launch. This permits CPU workers to move a ready frame between
+The native RMSNorm, mixed Q4/Q5/Q3 linear, BF16 control, GDN, residual, and SwiGLU wrappers bind the
+calling worker to its CUDA device before their first kernel load and before each launch. This permits CPU workers to move a ready frame between
 threads while the current implementation remains single-device; multi-device context selection and
 cross-device model residency are not implemented.
 
 The architecture allows a future scheduler to defer GPU capacity, choose a CPU-capable operation,
-coalesce ready frames, or run another sequence without changing instruction dependencies. It does
-not yet implement transformer layers, KV cache, GDN state, MTP, attention, sampling, batching, CUDA
-Graphs, or asynchronous GPU completion.
+coalesce ready frames, or run another sequence without changing instruction dependencies. This slice
+does not yet generalize the graph across later layers or implement KV cache, full attention, MTP,
+sampling, batching, CUDA Graphs, serving APIs, or asynchronous GPU completion.

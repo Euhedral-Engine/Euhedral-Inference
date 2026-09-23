@@ -8,7 +8,7 @@ static __device__ __forceinline__ unsigned short float_to_bf16(float value) {
 }
 extern "C" __global__ __launch_bounds__(128) void euhedral_rms_norm_bf16(
         const unsigned short* input, const unsigned short* weight, unsigned short* output,
-        unsigned int rows, unsigned int width, float epsilon) {
+        unsigned int rows, unsigned int width, float epsilon, float weight_offset) {
     unsigned int row = blockIdx.x;
     if (row >= rows) return;
     __shared__ float partial[128];
@@ -26,7 +26,7 @@ extern "C" __global__ __launch_bounds__(128) void euhedral_rms_norm_bf16(
     float inverse = rsqrtf(partial[0] / (float)width + epsilon);
     for (unsigned int col = threadIdx.x; col < width; col += blockDim.x) {
         unsigned long long index = (unsigned long long)row * width + col;
-        float value = bf16_to_float(input[index]) * inverse * bf16_to_float(weight[col]);
+        float value = bf16_to_float(input[index]) * inverse * (bf16_to_float(weight[col]) + weight_offset);
         output[index] = float_to_bf16(value);
     }
 }

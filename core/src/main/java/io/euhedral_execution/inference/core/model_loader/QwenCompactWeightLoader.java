@@ -53,6 +53,64 @@ final class QwenCompactWeightLoader {
         }
     }
 
+    static QwenWeights loadFirstLayer(
+            Path artifactPath, QwenConfig config, GpuMemory gpuMemory, Map<String, TensorDescriptor> descriptors)
+            throws IOException {
+        validateConfig(config);
+        validateInventory(config, descriptors);
+        if (config.layerTypes()[0] != QwenLayerType.GATED_DELTA_NET) {
+            throw new QwenWeightLoadException("actual layer zero is not a compact GDN layer");
+        }
+
+        String prefix = "text/layers/0";
+        String[] selectedNames = {
+            "text/token_embedding",
+            prefix + "/input_norm",
+            prefix + "/post_attention_norm",
+            prefix + "/gdn/a_log",
+            prefix + "/gdn/dt_bias",
+            prefix + "/gdn/convolution",
+            prefix + "/gdn/a_projection",
+            prefix + "/gdn/b_projection",
+            prefix + "/gdn/query_key",
+            prefix + "/gdn/value_z",
+            prefix + "/gdn/norm",
+            prefix + "/gdn/output",
+            prefix + "/mlp/gate_up",
+            prefix + "/mlp/down"
+        };
+
+        Map<String, TensorHandle> handles = new LinkedHashMap<>();
+        try {
+            for (String name : selectedNames) {
+                TensorDescriptor descriptor = descriptors.get(name);
+                if (descriptor == null) {
+                    throw new QwenWeightLoadException("compact artifact is missing runtime object '" + name + "'");
+                }
+                handles.put(name, TensorLoader.load(artifactPath, descriptor, gpuMemory));
+            }
+
+            QwenLayerWeights layer = new QwenLayerWeights(
+                    0,
+                    take(handles, prefix + "/input_norm"),
+                    take(handles, prefix + "/post_attention_norm"),
+                    buildGdn(handles, prefix),
+                    new QwenCompactDenseFfnWeights(
+                            take(handles, prefix + "/mlp/gate_up"), take(handles, prefix + "/mlp/down")));
+            return new QwenWeights(
+                    config,
+                    take(handles, "text/token_embedding"),
+                    new QwenLayerWeights[] {layer},
+                    null,
+                    null,
+                    null,
+                    handles);
+        } catch (Throwable failure) {
+            freeAll(handles.values(), gpuMemory, failure);
+            return propagate(failure);
+        }
+    }
+
     static QwenWeights assemble(QwenConfig config, Map<String, TensorHandle> handles) throws QwenWeightLoadException {
         TensorHandle tokenEmbedding = take(handles, "text/token_embedding");
         TensorHandle finalNorm = take(handles, "text/final_norm");

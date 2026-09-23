@@ -75,6 +75,24 @@ public final class QwenWeightLoader {
         }
     }
 
+    /// Loads the actual embedding and model-declared GDN layer zero without uploading later layers.
+    ///
+    /// The returned `QwenWeights` retains the source config and a one-entry array containing only
+    /// the actual layer-zero weights; it is intended for first-layer execution, not general inference.
+    public static QwenWeights loadFirstLayer(Path artifactPath, QwenArtifact artifact, GpuMemory gpuMemory)
+            throws IOException {
+        Objects.requireNonNull(artifactPath, "artifactPath");
+        Objects.requireNonNull(artifact, "artifact");
+        Objects.requireNonNull(gpuMemory, "gpuMemory");
+        if (!isCompactArtifact(artifact)) {
+            throw new QwenWeightLoadException("first-layer loading requires a compact Qwen artifact");
+        }
+        QwenConfig config = requireConfig(artifact);
+        validateConfig(config);
+        return QwenCompactWeightLoader.loadFirstLayer(
+                artifactPath, config, gpuMemory, indexDescriptors(requireDescriptors(artifact)));
+    }
+
     static boolean isCompactArtifact(QwenArtifact artifact) {
         return artifact.header() != null && artifact.header().version() == QwenArtifactHeader.COMPACT_VERSION;
     }

@@ -13,6 +13,8 @@ public final class QwenExecutionWorkspace implements AutoCloseable {
     private final long byteSize;
     private final long[] projectionAddresses;
     private final long[] projectionByteSizes;
+    private final long[] firstLayerAddresses;
+    private final long[] firstLayerByteSizes;
     private long normalizedAddress;
     private long hiddenStateAddress;
     private boolean closed;
@@ -22,8 +24,25 @@ public final class QwenExecutionWorkspace implements AutoCloseable {
     }
 
     QwenExecutionWorkspace(GpuMemory gpuMemory, int tokenCount, int hiddenSize, List<Integer> projectionWidths) {
+        this(gpuMemory, tokenCount, hiddenSize, projectionWidths, List.of());
+    }
+
+    QwenExecutionWorkspace(GpuMemory gpuMemory, int tokenCount, QwenExecutionPlan plan) {
+        this(gpuMemory, tokenCount, plan.weights().config().hiddenSize(), List.of(), plan.bufferSpecs());
+        if (!plan.hasFirstLayer()) {
+            throw new IllegalArgumentException("first-layer buffers require a first-layer plan");
+        }
+    }
+
+    private QwenExecutionWorkspace(
+            GpuMemory gpuMemory,
+            int tokenCount,
+            int hiddenSize,
+            List<Integer> projectionWidths,
+            List<QwenExecutionPlan.BufferSpec> firstLayerBuffers) {
         this.gpuMemory = Objects.requireNonNull(gpuMemory, "gpuMemory");
         Objects.requireNonNull(projectionWidths, "projectionWidths");
+        Objects.requireNonNull(firstLayerBuffers, "firstLayerBuffers");
         if (tokenCount <= 0) {
             throw new IllegalArgumentException("tokenCount must be positive");
         }
@@ -34,6 +53,8 @@ public final class QwenExecutionWorkspace implements AutoCloseable {
         this.hiddenSize = hiddenSize;
         this.projectionAddresses = new long[projectionWidths.size()];
         this.projectionByteSizes = new long[projectionWidths.size()];
+        this.firstLayerAddresses = new long[QwenExecutionPlan.Buffer.values().length];
+        this.firstLayerByteSizes = new long[QwenExecutionPlan.Buffer.values().length];
         try {
             this.byteSize = Math.multiplyExact(Math.multiplyExact((long) tokenCount, hiddenSize), Short.BYTES);
         } catch (ArithmeticException overflow) {
@@ -47,12 +68,31 @@ public final class QwenExecutionWorkspace implements AutoCloseable {
             this.projectionByteSizes[index] =
                     Math.multiplyExact(Math.multiplyExact((long) tokenCount, width), Short.BYTES);
         }
+        for (QwenExecutionPlan.BufferSpec spec : firstLayerBuffers) {
+            int index = spec.buffer().ordinal();
+            if (this.firstLayerByteSizes[index] != 0) {
+                throw new IllegalArgumentException("duplicate first-layer buffer: " + spec.buffer());
+            }
+            int elementBytes = spec.elementType() == QwenExecutionPlan.ElementType.BF16 ? Short.BYTES : Float.BYTES;
+            this.firstLayerByteSizes[index] =
+                    Math.multiplyExact(Math.multiplyExact((long) tokenCount, spec.width()), elementBytes);
+        }
     }
 
     /// Allocate only after the submission owns this object, so partial failure remains reclaimable.
     void allocateBuffers() {
         if (this.closed || this.hiddenStateAddress != 0) {
             throw new IllegalStateException("workspace has already been allocated or closed");
+        }
+        if (hasFirstLayerBuffers()) {
+            for (int index = 0; index < this.firstLayerByteSizes.length; index++) {
+                if (this.firstLayerByteSizes[index] != 0) {
+                    this.firstLayerAddresses[index] = allocate(this.firstLayerByteSizes[index]);
+                }
+            }
+            this.hiddenStateAddress = this.firstLayerAddresses[QwenExecutionPlan.Buffer.HIDDEN_STATE.ordinal()];
+            this.normalizedAddress = this.firstLayerAddresses[QwenExecutionPlan.Buffer.INPUT_NORMALIZED.ordinal()];
+            return;
         }
         this.hiddenStateAddress = allocate(this.byteSize);
         if (this.projectionByteSizes.length != 0) {
@@ -105,6 +145,35 @@ public final class QwenExecutionWorkspace implements AutoCloseable {
         return this.projectionAddresses[index];
     }
 
+    /// Returns a named layer-zero intermediate while this workspace is live.
+    public long address(QwenExecutionPlan.Buffer buffer) {
+        Objects.requireNonNull(buffer, "buffer");
+        long address = this.firstLayerAddresses[buffer.ordinal()];
+        if (this.closed || address == 0) {
+            throw new IllegalStateException("layer-zero buffer is unavailable: " + buffer);
+        }
+        return address;
+    }
+
+    public long address(QwenExecutionPlan.Buffer buffer, int index) {
+        if (buffer == QwenExecutionPlan.Buffer.SLICE_PROJECTION) {
+            return projectionAddress(index);
+        }
+        if (index != 0) {
+            throw new IndexOutOfBoundsException("named layer-zero buffers are not indexed");
+        }
+        return address(buffer);
+    }
+
+    public long bufferByteSize(QwenExecutionPlan.Buffer buffer) {
+        Objects.requireNonNull(buffer, "buffer");
+        long byteSize = this.firstLayerByteSizes[buffer.ordinal()];
+        if (this.closed || byteSize == 0) {
+            throw new IllegalStateException("layer-zero buffer is unavailable: " + buffer);
+        }
+        return byteSize;
+    }
+
     public boolean isClosed() {
         return this.closed;
     }
@@ -115,6 +184,28 @@ public final class QwenExecutionWorkspace implements AutoCloseable {
             return;
         }
         Throwable failure = null;
+        if (hasFirstLayerBuffers()) {
+            for (int index = 0; index < this.firstLayerAddresses.length; index++) {
+                try {
+                    if (this.firstLayerAddresses[index] != 0) {
+                        this.gpuMemory.free(this.firstLayerAddresses[index]);
+                        this.firstLayerAddresses[index] = 0;
+                    }
+                } catch (RuntimeException | Error cleanupFailure) {
+                    failure = combine(failure, cleanupFailure);
+                }
+            }
+            this.hiddenStateAddress = 0;
+            this.normalizedAddress = 0;
+            this.closed = allFirstLayerAddressesReleased();
+            if (failure instanceof Error error) {
+                throw error;
+            }
+            if (failure != null) {
+                throw (RuntimeException) failure;
+            }
+            return;
+        }
         for (int index = 0; index < this.projectionAddresses.length; index++) {
             try {
                 if (this.projectionAddresses[index] != 0) {
@@ -159,5 +250,19 @@ public final class QwenExecutionWorkspace implements AutoCloseable {
         }
         first.addSuppressed(next);
         return first;
+    }
+
+    private boolean hasFirstLayerBuffers() {
+        for (long byteSize : this.firstLayerByteSizes) {
+            if (byteSize != 0) return true;
+        }
+        return false;
+    }
+
+    private boolean allFirstLayerAddressesReleased() {
+        for (long address : this.firstLayerAddresses) {
+            if (address != 0) return false;
+        }
+        return true;
     }
 }

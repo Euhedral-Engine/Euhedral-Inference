@@ -52,6 +52,8 @@ subprojects {
             exclude("**/CudaGpuOperationsIntegrationTest.class")
             exclude("**/QwenInstructionCudaIntegrationTest.class")
             exclude("**/QwenCompactCudaExecutionIntegrationTest.class")
+            exclude("**/QwenLayerGpuOperationsIntegrationTest.class")
+            exclude("**/QwenFirstLayerCudaIntegrationTest.class")
             useJUnitPlatform()
         }
         val testSourceSet = the<SourceSetContainer>()["test"]
@@ -67,6 +69,8 @@ subprojects {
             include("**/CudaGpuOperationsIntegrationTest.class")
             include("**/QwenInstructionCudaIntegrationTest.class")
             include("**/QwenCompactCudaExecutionIntegrationTest.class")
+            include("**/QwenLayerGpuOperationsIntegrationTest.class")
+            include("**/QwenFirstLayerCudaIntegrationTest.class")
             systemProperty(
                     "euhedral.cuda.library",
                     nativeBuildDirectory.get().dir("lib").file(nativeLibraryFileName).asFile.absolutePath)
@@ -82,10 +86,14 @@ subprojects {
                             .get())
             jvmArgs("--enable-native-access=ALL-UNNAMED")
             doFirst {
+                val includeDirectory = providers.gradleProperty("euhedral.cuda.include-dir").orNull
                 val libraryDirectory = providers.gradleProperty("euhedral.cuda.library-dir").orNull
-                require(libraryDirectory != null) {
-                    "CUDA 13.1.x runtime path is required; pass -Peuhedral.cuda.library-dir=/path/to/cuda/lib"
+                require(includeDirectory != null && libraryDirectory != null) {
+                    "CUDA 13.1.x header and runtime paths are required; pass " +
+                            "-Peuhedral.cuda.include-dir=/path/to/cuda/include " +
+                            "-Peuhedral.cuda.library-dir=/path/to/cuda/lib"
                 }
+                environment("EUHEDRAL_CUDA_INCLUDE_DIR", includeDirectory)
                 val pathSeparator = System.getProperty("path.separator")
                 val operatingSystem = System.getProperty("os.name").lowercase()
                 if (operatingSystem.contains("windows")) {

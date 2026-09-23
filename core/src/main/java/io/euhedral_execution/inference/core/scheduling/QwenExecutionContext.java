@@ -1,6 +1,7 @@
 package io.euhedral_execution.inference.core.scheduling;
 
 import io.euhedral_execution.inference.core.gpu.QwenExecutionGpu;
+import io.euhedral_execution.inference.core.model_loader.config.QwenConfig;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -188,12 +189,45 @@ public final class QwenExecutionContext {
                 }
                 throw claimFailure;
             }
-            this.workspace = new QwenExecutionWorkspace(
-                    gpu, this.tokenIds.length, this.plan.weights().config().hiddenSize(), this.plan.projectionWidths());
+            initializeSequenceState(gpu);
+            this.workspace = this.plan.hasFirstLayer()
+                    ? new QwenExecutionWorkspace(gpu, this.tokenIds.length, this.plan)
+                    : new QwenExecutionWorkspace(
+                            gpu,
+                            this.tokenIds.length,
+                            this.plan.weights().config().hiddenSize(),
+                            this.plan.projectionWidths());
             this.workspace.allocateBuffers();
         } catch (RuntimeException | Error error) {
             fail(error);
             finish(null, gpu);
+        }
+    }
+
+    private void initializeSequenceState(QwenExecutionGpu gpu) {
+        if (!this.plan.hasFirstLayer()) return;
+        Object current = this.sequence.recurrentState();
+        if (current == null) {
+            QwenConfig config = this.plan.weights().config();
+            QwenGdnSequenceState created = QwenGdnSequenceState.allocate(
+                    gpu,
+                    config.linearNumKeyHeads(),
+                    config.linearNumValueHeads(),
+                    config.linearKeyHeadDim(),
+                    config.linearValueHeadDim(),
+                    config.linearConvKernelDim());
+            try {
+                this.sequence.setRecurrentState(this.lease, created);
+            } catch (RuntimeException | Error attachmentFailure) {
+                try {
+                    created.close();
+                } catch (Throwable cleanupFailure) {
+                    attachmentFailure.addSuppressed(cleanupFailure);
+                }
+                throw attachmentFailure;
+            }
+        } else if (!(current instanceof QwenGdnSequenceState)) {
+            throw new IllegalStateException("sequence already owns incompatible recurrent state");
         }
     }
 

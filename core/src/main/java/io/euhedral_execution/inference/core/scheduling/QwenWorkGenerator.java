@@ -6,6 +6,7 @@ import io.euhedral_execution.core.impl.FrameManager;
 import io.euhedral_execution.inference.core.gpu.QwenExecutionGpu;
 import io.euhedral_execution.inference.core.scheduling.frames.EmbeddingFrame;
 import io.euhedral_execution.inference.core.scheduling.frames.LinearFrame;
+import io.euhedral_execution.inference.core.scheduling.frames.QwenGpuOperationFrame;
 import io.euhedral_execution.inference.core.scheduling.frames.QwenInstructionFrame;
 import io.euhedral_execution.inference.core.scheduling.frames.RmsNormFrame;
 import java.util.HashMap;
@@ -25,8 +26,9 @@ public final class QwenWorkGenerator {
     private final QwenExecutionRunner workQueue;
     private final Consumer<? super QwenExecutionContext> terminalConsumer;
     private final FrameManager<QwenExecutionContext, EmbeddingFrame> embeddingFrames;
-    private final FrameManager<QwenExecutionContext, RmsNormFrame> rmsNormFrames;
+    private final Map<Integer, FrameManager<QwenExecutionContext, RmsNormFrame>> rmsNormFrames;
     private final Map<Integer, FrameManager<QwenExecutionContext, LinearFrame>> linearFrames;
+    private final Map<Integer, FrameManager<QwenExecutionContext, QwenGpuOperationFrame>> operationFrames;
     // These fields are owned exclusively by the serialized source pull/request path.
     private int nextInstructionId;
     private int pendingInstructionId = -1;
@@ -43,18 +45,30 @@ public final class QwenWorkGenerator {
         this.workQueue = Objects.requireNonNull(workQueue, "workQueue");
         this.terminalConsumer = Objects.requireNonNull(terminalConsumer, "terminalConsumer");
         this.embeddingFrames = embeddingManager(plan.instructions().getFirst());
-        this.rmsNormFrames = plan.instructions().stream()
-                .filter(instruction -> instruction.kind() == QwenExecutionPlan.Kind.RMS_NORM)
-                .findFirst()
-                .map(this::rmsNormManager)
-                .orElse(null);
+        Map<Integer, FrameManager<QwenExecutionContext, RmsNormFrame>> rmsManagers = new HashMap<>();
         Map<Integer, FrameManager<QwenExecutionContext, LinearFrame>> linearManagers = new HashMap<>();
+        Map<Integer, FrameManager<QwenExecutionContext, QwenGpuOperationFrame>> operationManagers = new HashMap<>();
         for (QwenExecutionPlan.Instruction instruction : plan.instructions()) {
-            if (instruction.kind() == QwenExecutionPlan.Kind.Q3_LINEAR) {
+            if (instruction.kind() == QwenExecutionPlan.Kind.RMS_NORM
+                    || instruction.kind() == QwenExecutionPlan.Kind.RMS_NORM_UNIT_OFFSET) {
+                rmsManagers.put(instruction.id(), rmsNormManager(instruction));
+            } else if (instruction.kind() == QwenExecutionPlan.Kind.Q3_LINEAR
+                    || instruction.kind() == QwenExecutionPlan.Kind.Q4_LINEAR
+                    || instruction.kind() == QwenExecutionPlan.Kind.Q5_LINEAR
+                    || instruction.kind() == QwenExecutionPlan.Kind.BF16_LINEAR) {
                 linearManagers.put(instruction.id(), linearManager(instruction));
+            } else if (instruction.kind() == QwenExecutionPlan.Kind.GDN_CONTROL
+                    || instruction.kind() == QwenExecutionPlan.Kind.GDN_CONVOLUTION
+                    || instruction.kind() == QwenExecutionPlan.Kind.GDN_RECURRENCE
+                    || instruction.kind() == QwenExecutionPlan.Kind.GDN_GATED_RMS_NORM
+                    || instruction.kind() == QwenExecutionPlan.Kind.RESIDUAL_ADD
+                    || instruction.kind() == QwenExecutionPlan.Kind.SWIGLU) {
+                operationManagers.put(instruction.id(), operationManager(instruction));
             }
         }
+        this.rmsNormFrames = Map.copyOf(rmsManagers);
         this.linearFrames = Map.copyOf(linearManagers);
+        this.operationFrames = Map.copyOf(operationManagers);
     }
 
     private FrameManager<QwenExecutionContext, EmbeddingFrame> embeddingManager(
@@ -78,6 +92,16 @@ public final class QwenWorkGenerator {
         var manager = new FrameManager<QwenExecutionContext, LinearFrame>(FRAME_POOL_CAPACITY, FRAME_POOL_PASSWORD);
         manager.setFactory(new FrameFactory<>(
                 (idHash, context) -> new LinearFrame(idHash, manager, context, instruction, this.gpu, this),
+                (context, frame) -> frame.replace(context)));
+        return manager;
+    }
+
+    private FrameManager<QwenExecutionContext, QwenGpuOperationFrame> operationManager(
+            QwenExecutionPlan.Instruction instruction) {
+        var manager =
+                new FrameManager<QwenExecutionContext, QwenGpuOperationFrame>(FRAME_POOL_CAPACITY, FRAME_POOL_PASSWORD);
+        manager.setFactory(new FrameFactory<>(
+                (idHash, context) -> new QwenGpuOperationFrame(idHash, manager, context, instruction, this.gpu, this),
                 (context, frame) -> frame.replace(context)));
         return manager;
     }
@@ -187,9 +211,14 @@ public final class QwenWorkGenerator {
     private QwenInstructionFrame create(QwenExecutionContext context, QwenExecutionPlan.Instruction instruction) {
         return switch (instruction.kind()) {
             case EMBEDDING -> this.embeddingFrames.getOrCreate(context, FRAME_POOL_PASSWORD);
-            case RMS_NORM -> Objects.requireNonNull(this.rmsNormFrames).getOrCreate(context, FRAME_POOL_PASSWORD);
-            case Q3_LINEAR ->
+            case RMS_NORM, RMS_NORM_UNIT_OFFSET ->
+                Objects.requireNonNull(this.rmsNormFrames.get(instruction.id()))
+                        .getOrCreate(context, FRAME_POOL_PASSWORD);
+            case Q3_LINEAR, Q4_LINEAR, Q5_LINEAR, BF16_LINEAR ->
                 Objects.requireNonNull(this.linearFrames.get(instruction.id()))
+                        .getOrCreate(context, FRAME_POOL_PASSWORD);
+            case GDN_CONTROL, GDN_CONVOLUTION, GDN_RECURRENCE, GDN_GATED_RMS_NORM, RESIDUAL_ADD, SWIGLU ->
+                Objects.requireNonNull(this.operationFrames.get(instruction.id()))
                         .getOrCreate(context, FRAME_POOL_PASSWORD);
         };
     }

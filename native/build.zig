@@ -43,6 +43,10 @@ pub fn build(b: *std.Build) void {
         .file = b.path("src/q3_linear_bf16.c"),
         .flags = &.{"-std=c11", "-fvisibility=hidden"},
     });
+    library.root_module.addCSourceFile(.{
+        .file = b.path("src/qwen_layer_ops.c"),
+        .flags = &.{"-std=c11", "-fvisibility=hidden"},
+    });
     library.root_module.addIncludePath(b.path("include"));
     library.root_module.addIncludePath(.{.cwd_relative = cuda_include_dir});
     library.root_module.addLibraryPath(.{.cwd_relative = cuda_lib_dir});
@@ -59,4 +63,7 @@ pub fn build(b: *std.Build) void {
     b.installFile("src/q3_embedding.cu", "share/euhedral_cuda/q3_embedding.cu");
     b.installFile("src/rms_norm_bf16.cu", "share/euhedral_cuda/rms_norm_bf16.cu");
     b.installFile("src/q3_linear_bf16.cu", "share/euhedral_cuda/q3_linear_bf16.cu");
+    b.installFile("src/qwen_layer_linear.cu", "share/euhedral_cuda/qwen_layer_linear.cu");
+    b.installFile("src/qwen_gdn_ops.cu", "share/euhedral_cuda/qwen_gdn_ops.cu");
+    b.installFile("src/qwen_elementwise.cu", "share/euhedral_cuda/qwen_elementwise.cu");
 }

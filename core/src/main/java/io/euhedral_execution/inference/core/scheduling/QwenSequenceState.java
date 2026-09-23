@@ -6,7 +6,7 @@ import java.util.concurrent.atomic.AtomicReference;
 /// Request-lifetime state shared by successive Qwen execution quanta.
 ///
 /// The execution lease is intentionally exclusive: one submitted chain may mutate this state at a
-/// time. KV-cache and recurrent state are opaque placeholders until their ownership contracts exist.
+/// time. Sequence-owned recurrent resources are closed when the sequence reaches a terminal state.
 public final class QwenSequenceState {
 
     public enum TerminalState {
@@ -130,6 +130,9 @@ public final class QwenSequenceState {
                     current.kvCacheState(),
                     current.recurrentState());
             if (this.state.compareAndSet(current, updated)) {
+                if (terminal == TerminalState.CANCELLED) {
+                    closePersistentRecurrentState(updated);
+                }
                 return;
             }
         }
@@ -147,6 +150,7 @@ public final class QwenSequenceState {
             }
             State updated = current.withTerminal(TerminalState.COMPLETED, current.terminalFailure());
             if (this.state.compareAndSet(current, updated)) {
+                closePersistentRecurrentState(updated);
                 return;
             }
         }
@@ -209,6 +213,9 @@ public final class QwenSequenceState {
                     current.kvCacheState(),
                     current.recurrentState());
             if (this.state.compareAndSet(current, updated)) {
+                if (cancelled) {
+                    closePersistentRecurrentState(updated);
+                }
                 return cancelled;
             }
         }
@@ -227,6 +234,7 @@ public final class QwenSequenceState {
                     current.kvCacheState(),
                     current.recurrentState());
             if (this.state.compareAndSet(current, updated)) {
+                closePersistentRecurrentState(updated);
                 return;
             }
         }
@@ -250,6 +258,7 @@ public final class QwenSequenceState {
                     current.kvCacheState(),
                     current.recurrentState());
             if (this.state.compareAndSet(current, updated)) {
+                closePersistentRecurrentState(updated);
                 return;
             }
         }
@@ -269,6 +278,7 @@ public final class QwenSequenceState {
                     current.kvCacheState(),
                     current.recurrentState());
             if (this.state.compareAndSet(current, updated)) {
+                closePersistentRecurrentState(updated);
                 return;
             }
         }
@@ -281,6 +291,7 @@ public final class QwenSequenceState {
             if (current.activeLease() != null) {
                 throw new IllegalStateException("Sequence execution is already claimed");
             }
+            boolean wasActive = current.terminalState() == TerminalState.ACTIVE;
             State updated = new State(
                     current.currentTokenPosition(),
                     null,
@@ -290,6 +301,9 @@ public final class QwenSequenceState {
                     current.kvCacheState(),
                     current.recurrentState());
             if (this.state.compareAndSet(current, updated)) {
+                if (wasActive) {
+                    closePersistentRecurrentState(updated);
+                }
                 return;
             }
         }
@@ -302,10 +316,30 @@ public final class QwenSequenceState {
             if (current.activeLease() != null) {
                 throw new IllegalStateException("Sequence execution is still claimed");
             }
+            boolean wasActive = current.terminalState() == TerminalState.ACTIVE;
             State updated = current.withTerminal(TerminalState.FAILED, failure);
             if (this.state.compareAndSet(current, updated)) {
+                if (wasActive) {
+                    closePersistentRecurrentState(updated);
+                }
                 return;
             }
+        }
+    }
+
+    private static void closePersistentRecurrentState(State terminalState) {
+        if (!(terminalState.recurrentState() instanceof AutoCloseable recurrentState)) {
+            return;
+        }
+        try {
+            recurrentState.close();
+        } catch (Exception cleanupFailure) {
+            Throwable terminalFailure = terminalState.terminalFailure();
+            if (terminalFailure != null) {
+                terminalFailure.addSuppressed(cleanupFailure);
+                return;
+            }
+            throw new IllegalStateException("Unable to release persistent recurrent state", cleanupFailure);
         }
     }
 
