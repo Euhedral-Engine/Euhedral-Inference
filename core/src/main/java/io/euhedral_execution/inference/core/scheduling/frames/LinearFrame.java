@@ -21,14 +21,13 @@ public final class LinearFrame extends QwenInstructionFrame {
 
     @Override
     protected void perform(QwenExecutionContext context, QwenExecutionPlan.Instruction instruction) {
-        var weight = instruction.weight();
         gpu().linearQ3Bf16(
                         context.workspace().normalizedStateAddress(),
-                        weight.deviceAddress(),
+                        instruction.weightAddress(),
                         context.workspace().projectionAddress(instruction.id() - 2),
                         context.inputTokenCount(),
                         context.plan().weights().config().hiddenSize(),
                         instruction.outputWidth(),
-                        weight.byteSize());
+                        instruction.weightByteSize());
     }
 }

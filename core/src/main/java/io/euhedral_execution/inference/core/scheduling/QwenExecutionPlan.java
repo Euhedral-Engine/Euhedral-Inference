@@ -34,6 +34,16 @@ public final class QwenExecutionPlan {
         public TensorHandle weight() {
             return copyHandle(this.weight);
         }
+
+        /// Returns the borrowed device address without materializing a defensive TensorHandle copy.
+        public long weightAddress() {
+            return this.weight.deviceAddress();
+        }
+
+        /// Returns the borrowed payload size without materializing a defensive TensorHandle copy.
+        public long weightByteSize() {
+            return this.weight.byteSize();
+        }
     }
 
     private final QwenWeights weights;

@@ -51,12 +51,13 @@ subprojects {
             exclude("**/QwenEmbeddingCudaIntegrationTest.class")
             exclude("**/CudaGpuOperationsIntegrationTest.class")
             exclude("**/QwenInstructionCudaIntegrationTest.class")
+            exclude("**/QwenCompactCudaExecutionIntegrationTest.class")
             useJUnitPlatform()
         }
         val testSourceSet = the<SourceSetContainer>()["test"]
         tasks.register<Test>("cudaIntegrationTest") {
             group = "verification"
-            description = "Run dedicated CUDA 13.1.x memory, residency, and embedding integration tests."
+            description = "Run dedicated CUDA 13.1.x memory, operator, residency, and execution integration tests."
             dependsOn(rootProject.tasks.named("nativeBuild"))
             testClassesDirs = testSourceSet.output.classesDirs
             classpath = testSourceSet.runtimeClasspath
@@ -65,6 +66,7 @@ subprojects {
             include("**/QwenEmbeddingCudaIntegrationTest.class")
             include("**/CudaGpuOperationsIntegrationTest.class")
             include("**/QwenInstructionCudaIntegrationTest.class")
+            include("**/QwenCompactCudaExecutionIntegrationTest.class")
             systemProperty(
                     "euhedral.cuda.library",
                     nativeBuildDirectory.get().dir("lib").file(nativeLibraryFileName).asFile.absolutePath)

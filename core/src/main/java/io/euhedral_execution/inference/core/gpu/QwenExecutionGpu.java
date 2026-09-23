@@ -1,6 +1,6 @@
 package io.euhedral_execution.inference.core.gpu;
 
-/// Synchronous GPU operations required by the first Qwen execution stage.
+/// Synchronous GPU operations used by the current Qwen instruction slice.
 public interface QwenExecutionGpu extends GpuMemory {
 
     void embedQ3(

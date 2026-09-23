@@ -33,11 +33,10 @@ public final class EmbeddingFrame extends QwenInstructionFrame {
             }
             long tokenBuffer = context.allocateTemporaryTokenIds(gpu(), bytes);
             gpu().copyHostToDevice(tokenBuffer, host, bytes);
-            var weight = instruction.weight();
             gpu().embedQ3(
                             tokenBuffer,
-                            weight.deviceAddress(),
-                            weight.byteSize(),
+                            instruction.weightAddress(),
+                            instruction.weightByteSize(),
                             context.workspace().hiddenStateAddress(),
                             ids.length,
                             context.plan().weights().config().vocabSize(),

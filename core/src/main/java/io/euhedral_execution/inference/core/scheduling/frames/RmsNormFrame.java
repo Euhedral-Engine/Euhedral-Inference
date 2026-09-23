@@ -23,7 +23,7 @@ public final class RmsNormFrame extends QwenInstructionFrame {
     protected void perform(QwenExecutionContext context, QwenExecutionPlan.Instruction instruction) {
         gpu().rmsNormBf16(
                         context.workspace().hiddenStateAddress(),
-                        instruction.weight().deviceAddress(),
+                        instruction.weightAddress(),
                         context.workspace().normalizedStateAddress(),
                         context.inputTokenCount(),
                         instruction.outputWidth(),

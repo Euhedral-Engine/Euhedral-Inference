@@ -8,6 +8,17 @@ import org.junit.jupiter.api.Test;
 
 class QwenExecutionPlanTest {
     @Test
+    void instructionExposesBorrowedWeightAddressAndSizeWithoutReturningAHandle() {
+        var projection = QwenExecutionFixtures.q3("projection", 64, 201);
+        var plan = new QwenExecutionPlan(
+                QwenExecutionFixtures.weights(), QwenExecutionFixtures.norm(), List.of(projection));
+        var instruction = plan.instructions().get(2);
+
+        assertEquals(201, instruction.weightAddress());
+        assertEquals(projection.byteSize(), instruction.weightByteSize());
+    }
+
+    @Test
     void publishedTopologyAndWeightShapeCannotBeMutatedByCallers() {
         var original = QwenExecutionFixtures.q3("projection", 64, 201);
         var plan =
