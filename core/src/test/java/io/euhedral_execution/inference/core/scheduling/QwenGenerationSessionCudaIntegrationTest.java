@@ -15,7 +15,7 @@ import io.euhedral_execution.core.impl.BaseCloneableObject;
 import io.euhedral_execution.core.impl.DefaultExecutor;
 import io.euhedral_execution.hardware_utils.SystemInfo;
 import io.euhedral_execution.inference.core.gpu.CudaGpuMemory;
-import io.euhedral_execution.inference.core.model_loader.QwenWeightLoader;
+import io.euhedral_execution.inference.core.model_loader.QwenModel;
 import io.euhedral_execution.inference.core.model_loader.QwenWeights;
 import io.euhedral_execution.inference.core.model_loader.artifact.QwenArtifact;
 import io.euhedral_execution.inference.core.model_loader.artifact.QwenArtifactReader;
@@ -66,11 +66,8 @@ class QwenGenerationSessionCudaIntegrationTest {
             ControlPlaneLattice lattice = createLattice(cpus);
             try {
                 long freeBeforeWeights = gpu.deviceMemoryInfo().freeBytes();
-                QwenWeights weights = QwenWeightLoader.load(artifactPath, artifact, gpu);
-                List<Long> modelAddresses = weights.runtimeObjects().values().stream()
-                        .map(handle -> handle.deviceAddress())
-                        .distinct()
-                        .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+                QwenModel model = QwenModel.load(artifactPath, artifact, gpu);
+                QwenWeights weights = model.weights();
                 Throwable failure = null;
                 long freeAfterWeights = gpu.deviceMemoryInfo().freeBytes();
                 try {
@@ -165,13 +162,11 @@ class QwenGenerationSessionCudaIntegrationTest {
                 } catch (Throwable executionFailure) {
                     failure = executionFailure;
                 } finally {
-                    for (int index = modelAddresses.size() - 1; index >= 0; index--) {
-                        try {
-                            gpu.free(modelAddresses.get(index));
-                        } catch (Throwable cleanupFailure) {
-                            if (failure == null) failure = cleanupFailure;
-                            else failure.addSuppressed(cleanupFailure);
-                        }
+                    try {
+                        model.close();
+                    } catch (Throwable cleanupFailure) {
+                        if (failure == null) failure = cleanupFailure;
+                        else failure.addSuppressed(cleanupFailure);
                     }
                 }
                 long freeAfterWeightsRelease = gpu.deviceMemoryInfo().freeBytes();

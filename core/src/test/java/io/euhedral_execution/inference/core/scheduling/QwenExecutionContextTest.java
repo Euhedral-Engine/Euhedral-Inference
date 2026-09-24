@@ -19,6 +19,35 @@ import org.junit.jupiter.api.Test;
 
 class QwenExecutionContextTest {
     @Test
+    void cancellationCleanupFailureStillPublishesOutcomeAndCanBeRetried() throws Exception {
+        var plan = new QwenExecutionPlan(QwenExecutionFixtures.weights());
+        var gpu = new QwenExecutionFixtures.RecordingGpu();
+        var sequence = new QwenSequenceState(901);
+        var lease = sequence.claimExecution(0);
+        var attempts = new AtomicInteger();
+        sequence.setRecurrentState(lease, (AutoCloseable) () -> {
+            if (attempts.incrementAndGet() == 1) throw new IllegalStateException("transient free failure");
+        });
+        sequence.releaseExecution(lease, 0);
+        var context =
+                new QwenExecutionContext(plan, sequence, QwenExecutionContext.ExecutionKind.DECODE, 0, new int[] {1});
+        gpu.afterEmbedding = context::cancel;
+        var runner = new QwenExecutionRunner(plan, gpu);
+        new DefaultExecutor().input(runner);
+        var outcome = runner.submit(context);
+        runner.request(1);
+        assertTrue(outcome.isDone(), "terminal cleanup failure stranded the generation future");
+        assertEquals(
+                QwenExecutionContext.Status.FAILED,
+                outcome.get(1, TimeUnit.SECONDS).status());
+        assertFalse(sequence.isExecutionClaimed());
+        sequence.complete();
+        assertEquals(2, attempts.get());
+        runner.completeGracefully();
+        assertTrue(runner.isComplete());
+    }
+
+    @Test
     void directSourceRunsEmbeddingNormAndIndependentProjections() throws Exception {
         var weights = QwenExecutionFixtures.weights();
         var plan = new QwenExecutionPlan(

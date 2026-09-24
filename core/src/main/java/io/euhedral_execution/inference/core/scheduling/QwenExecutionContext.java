@@ -317,20 +317,28 @@ public final class QwenExecutionContext {
             error = releaseLogits(error);
         }
         Outcome completed;
-        if (error != null) {
-            if (this.lease != null) {
-                this.sequence.markFailed(this.lease, error);
+        try {
+            if (error != null) {
+                if (this.lease != null) {
+                    this.sequence.markFailed(this.lease, error);
+                }
+                completed = new Outcome(Status.FAILED, error);
+            } else if (this.sequence.cancellationRequested()) {
+                if (this.lease != null) {
+                    this.sequence.markCancelled(this.lease);
+                }
+                completed = new Outcome(Status.CANCELLED, null);
+            } else {
+                boolean cancelled = this.sequence.releaseExecutionAndCheckCancellation(
+                        this.lease, this.startPosition + this.tokenIds.length);
+                completed = new Outcome(cancelled ? Status.CANCELLED : Status.SUCCESS, null);
             }
-            completed = new Outcome(Status.FAILED, error);
-        } else if (this.sequence.cancellationRequested()) {
-            if (this.lease != null) {
-                this.sequence.markCancelled(this.lease);
-            }
-            completed = new Outcome(Status.CANCELLED, null);
-        } else {
-            boolean cancelled = this.sequence.releaseExecutionAndCheckCancellation(
-                    this.lease, this.startPosition + this.tokenIds.length);
-            completed = new Outcome(cancelled ? Status.CANCELLED : Status.SUCCESS, null);
+        } catch (Throwable cleanupFailure) {
+            // Terminal state is published before persistent cleanup. Never strand the caller's future
+            // if a device free fails; the sequence owner can retry cleanup after observing this failure.
+            if (error == null) error = cleanupFailure;
+            else if (error != cleanupFailure) error.addSuppressed(cleanupFailure);
+            completed = new Outcome(Status.FAILED, releaseLogits(error));
         }
         this.lease = null;
         this.outcome.complete(completed);

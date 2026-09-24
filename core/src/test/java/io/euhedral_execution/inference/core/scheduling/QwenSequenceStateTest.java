@@ -143,6 +143,29 @@ class QwenSequenceStateTest {
         }
     }
 
+    @Test
+    void terminalCleanupRetriesFailuresWithoutReclosingReleasedState() {
+        for (boolean failSequence : List.of(false, true)) {
+            var state = new QwenSequenceState(31);
+            var lease = state.claimExecution(0);
+            var attempts = new java.util.concurrent.atomic.AtomicInteger();
+            var kv = new CloseableState();
+            state.setKvCacheState(lease, kv);
+            state.setRecurrentState(lease, (AutoCloseable) () -> {
+                if (attempts.incrementAndGet() <= 2) throw new IllegalStateException("transient free failure");
+            });
+            state.releaseExecution(lease, 1);
+            if (failSequence) state.markFailedAfterRelease(new IllegalStateException("execution failed"));
+            else assertThrows(IllegalStateException.class, state::cancel);
+            assertEquals(1, kv.closeCount);
+            assertThrows(IllegalStateException.class, state::complete);
+            state.complete();
+            state.complete();
+            assertEquals(3, attempts.get());
+            assertEquals(1, kv.closeCount);
+        }
+    }
+
     private static final class CloseableState implements AutoCloseable {
         private int closeCount;
 

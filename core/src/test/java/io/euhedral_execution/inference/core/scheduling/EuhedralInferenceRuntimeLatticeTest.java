@@ -52,6 +52,59 @@ class EuhedralInferenceRuntimeLatticeTest {
             Path.of("/mnt/shared/qwen38-quant/artifacts/qwen3_5_27b_compact_q3.edrl");
 
     @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS)
+    void sharedRuntimeAdmitsIndependentCallsConcurrentlyToRealFabric() throws Exception {
+        BitSet cpus = twoWorkerCpus();
+        assumeTrue(cpus.cardinality() == 2);
+        var probe = new LatticeEdge(new AtomicBoolean());
+        int registrations = probe.getThreadCount();
+        var lattice = createLattice(cpus);
+        try {
+            lattice.start();
+            awaitWorkers(lattice, 2, probe, registrations + 2);
+            var plan = new QwenExecutionPlan(
+                    QwenExecutionFixtures.weights(),
+                    QwenExecutionFixtures.norm(),
+                    List.of(QwenExecutionFixtures.q3("projection", 64, 201)));
+            var gpu = new ConcurrentGpu();
+            var admissionGate = new WorkGate(2);
+            var runtime = new EuhedralInferenceRuntime(
+                    source -> {
+                        admissionGate.enterIfSelected();
+                        lattice.addUpstream(source);
+                    },
+                    plan,
+                    gpu);
+            try (var calls = java.util.concurrent.Executors.newFixedThreadPool(2)) {
+                try {
+                    var first = calls.submit(() -> runtime.execute(List.of(new QwenExecutionContext(
+                            plan, new QwenSequenceState(801), QwenExecutionContext.ExecutionKind.PREFILL, 0, new int[] {
+                                1
+                            }))));
+                    var second = calls.submit(() -> runtime.execute(List.of(new QwenExecutionContext(
+                            plan, new QwenSequenceState(802), QwenExecutionContext.ExecutionKind.PREFILL, 0, new int[] {
+                                2
+                            }))));
+                    assertTrue(admissionGate.awaitEntries(), "one runtime serialized independent input admission");
+                    assertEquals(2, admissionGate.workerCount());
+                    admissionGate.release();
+                    assertEquals(
+                            QwenExecutionContext.Status.SUCCESS,
+                            first.get(10, TimeUnit.SECONDS).getFirst().status());
+                    assertEquals(
+                            QwenExecutionContext.Status.SUCCESS,
+                            second.get(10, TimeUnit.SECONDS).getFirst().status());
+                    assertFalse(runtime.hasAttachedRunner());
+                } finally {
+                    admissionGate.release();
+                }
+            }
+        } finally {
+            lattice.close();
+        }
+    }
+
+    @Test
     void disconnectReleasesTerminatedRunnerWhenDownstreamCompletionFails() {
         var plan = new QwenExecutionPlan(QwenExecutionFixtures.weights());
         var gpu = new ConcurrentGpu();

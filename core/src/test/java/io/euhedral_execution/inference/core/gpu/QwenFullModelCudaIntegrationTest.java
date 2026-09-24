@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.euhedral_execution.core.impl.DefaultExecutor;
-import io.euhedral_execution.inference.core.model_loader.QwenWeightLoader;
+import io.euhedral_execution.inference.core.model_loader.QwenModel;
 import io.euhedral_execution.inference.core.model_loader.QwenWeights;
 import io.euhedral_execution.inference.core.model_loader.artifact.QwenArtifact;
 import io.euhedral_execution.inference.core.model_loader.artifact.QwenArtifactReader;
@@ -74,11 +74,8 @@ class QwenFullModelCudaIntegrationTest {
 
         try (CudaGpuMemory gpu = new CudaGpuMemory(libraryPath)) {
             long freeBefore = gpu.deviceMemoryInfo().freeBytes();
-            QwenWeights weights = QwenWeightLoader.load(artifactPath, artifact, gpu);
-            List<Long> modelAddresses = weights.runtimeObjects().values().stream()
-                    .map(handle -> handle.deviceAddress())
-                    .distinct()
-                    .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+            QwenModel model = QwenModel.load(artifactPath, artifact, gpu);
+            QwenWeights weights = model.weights();
             Throwable failure = null;
             QwenSequenceState prefixSequence = new QwenSequenceState(501);
             QwenSequenceState mixedSequence = new QwenSequenceState(502);
@@ -297,13 +294,11 @@ class QwenFullModelCudaIntegrationTest {
                         else failure.addSuppressed(cleanupFailure);
                     }
                 }
-                for (int index = modelAddresses.size() - 1; index >= 0; index--) {
-                    try {
-                        gpu.free(modelAddresses.get(index));
-                    } catch (Throwable cleanupFailure) {
-                        if (failure == null) failure = cleanupFailure;
-                        else failure.addSuppressed(cleanupFailure);
-                    }
+                try {
+                    model.close();
+                } catch (Throwable cleanupFailure) {
+                    if (failure == null) failure = cleanupFailure;
+                    else failure.addSuppressed(cleanupFailure);
                 }
             }
             long freeAfter = gpu.deviceMemoryInfo().freeBytes();
@@ -330,11 +325,8 @@ class QwenFullModelCudaIntegrationTest {
         QwenArtifact artifact = QwenArtifactReader.read(artifactPath);
 
         try (CudaGpuMemory gpu = new CudaGpuMemory(libraryPath)) {
-            QwenWeights weights = QwenWeightLoader.load(artifactPath, artifact, gpu);
-            List<Long> modelAddresses = weights.runtimeObjects().values().stream()
-                    .map(handle -> handle.deviceAddress())
-                    .distinct()
-                    .toList();
+            QwenModel model = QwenModel.load(artifactPath, artifact, gpu);
+            QwenWeights weights = model.weights();
             QwenSequenceState sequence = new QwenSequenceState(601);
             RunResult run = null;
             Throwable failure = null;
@@ -378,12 +370,10 @@ class QwenFullModelCudaIntegrationTest {
                         failure = mergeFailure(failure, cleanupFailure);
                     }
                 }
-                for (int index = modelAddresses.size() - 1; index >= 0; index--) {
-                    try {
-                        gpu.free(modelAddresses.get(index));
-                    } catch (Throwable cleanupFailure) {
-                        failure = mergeFailure(failure, cleanupFailure);
-                    }
+                try {
+                    model.close();
+                } catch (Throwable cleanupFailure) {
+                    failure = mergeFailure(failure, cleanupFailure);
                 }
             }
             if (failure instanceof Exception exception) throw exception;

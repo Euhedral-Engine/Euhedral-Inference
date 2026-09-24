@@ -5,7 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.euhedral_execution.core.impl.DefaultExecutor;
-import io.euhedral_execution.inference.core.model_loader.QwenWeightLoader;
+import io.euhedral_execution.inference.core.model_loader.QwenModel;
 import io.euhedral_execution.inference.core.model_loader.QwenWeights;
 import io.euhedral_execution.inference.core.model_loader.artifact.QwenArtifact;
 import io.euhedral_execution.inference.core.model_loader.artifact.QwenArtifactHeader;
@@ -18,7 +18,6 @@ import io.euhedral_execution.inference.core.scheduling.QwenSequenceState;
 import java.lang.foreign.Arena;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -39,10 +38,8 @@ class QwenFirstLayerCudaIntegrationTest {
         assertEquals(QwenLayerType.GATED_DELTA_NET, artifact.config().layerTypes()[0]);
 
         try (CudaGpuMemory gpu = new CudaGpuMemory(libraryPath)) {
-            QwenWeights weights = QwenWeightLoader.loadFirstLayer(artifactPath, artifact, gpu);
-            List<Long> modelAddresses = weights.runtimeObjects().values().stream()
-                    .map(handle -> handle.deviceAddress())
-                    .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+            QwenModel model = QwenModel.loadFirstLayer(artifactPath, artifact, gpu);
+            QwenWeights weights = model.weights();
             QwenSequenceState sequence = new QwenSequenceState(0x5147454eL);
             QwenExecutionRunner runner = null;
             try {
@@ -135,7 +132,7 @@ class QwenFirstLayerCudaIntegrationTest {
                 sequence.complete();
             } finally {
                 if (runner != null) runner.completeGracefully();
-                for (int index = modelAddresses.size() - 1; index >= 0; index--) gpu.free(modelAddresses.get(index));
+                model.close();
             }
         }
     }

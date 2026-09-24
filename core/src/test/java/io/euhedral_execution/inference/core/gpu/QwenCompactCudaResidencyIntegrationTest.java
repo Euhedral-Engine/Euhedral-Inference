@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.euhedral_execution.inference.core.gpu.CudaGpuMemory.DeviceMemoryInfo;
+import io.euhedral_execution.inference.core.model_loader.QwenModel;
 import io.euhedral_execution.inference.core.model_loader.QwenWeightLoader;
 import io.euhedral_execution.inference.core.model_loader.QwenWeights;
 import io.euhedral_execution.inference.core.model_loader.artifact.QwenArtifact;
@@ -57,7 +58,7 @@ class QwenCompactCudaResidencyIntegrationTest {
         Path libraryPath = Path.of(System.getProperty("euhedral.cuda.library"));
         try (CudaGpuMemory gpu = new CudaGpuMemory(libraryPath)) {
             CudaGpuMemory.DeviceMemoryInfo before = gpu.deviceMemoryInfo();
-            QwenWeights weights = null;
+            QwenModel model = null;
             CudaGpuMemory.DeviceMemoryInfo resident = null;
             Throwable failure = null;
             long allocatedDeviceBytes = 0;
@@ -67,7 +68,8 @@ class QwenCompactCudaResidencyIntegrationTest {
                             + gibibytes(expectedDeviceBytes) + ", available " + gibibytes(before.freeBytes()));
                 }
 
-                weights = QwenWeightLoader.load(artifactPath, artifact, gpu);
+                model = QwenModel.load(artifactPath, artifact, gpu);
+                QwenWeights weights = model.weights();
                 verifyCompleteAssembly(weights, descriptors, descriptorNames);
                 allocatedDeviceBytes = sumHandleBytes(weights.runtimeObjects().values());
                 assertEquals(expectedDeviceBytes, allocatedDeviceBytes, "device allocations do not cover every object");
@@ -76,8 +78,13 @@ class QwenCompactCudaResidencyIntegrationTest {
             } catch (Throwable loadFailure) {
                 failure = loadFailure;
             } finally {
-                if (weights != null) {
-                    failure = freeAll(weights, gpu, failure);
+                if (model != null) {
+                    try {
+                        model.close();
+                    } catch (Throwable cleanupFailure) {
+                        if (failure == null) failure = cleanupFailure;
+                        else failure.addSuppressed(cleanupFailure);
+                    }
                 }
             }
 
@@ -178,25 +185,6 @@ class QwenCompactCudaResidencyIntegrationTest {
             assertEquals(descriptor.byteSize(), handle.byteSize(), "payload size mismatch for " + descriptor.name());
             assertTrue(addresses.add(handle.deviceAddress()), "duplicate GPU address for " + descriptor.name());
         }
-    }
-
-    private static Throwable freeAll(QwenWeights weights, CudaGpuMemory gpu, Throwable failure) {
-        Set<Long> freedAddresses = new HashSet<>();
-        for (TensorHandle handle : weights.runtimeObjects().values()) {
-            if (!freedAddresses.add(handle.deviceAddress())) {
-                continue;
-            }
-            try {
-                gpu.free(handle.deviceAddress());
-            } catch (Throwable cleanupFailure) {
-                if (failure == null) {
-                    failure = cleanupFailure;
-                } else {
-                    failure.addSuppressed(cleanupFailure);
-                }
-            }
-        }
-        return failure;
     }
 
     private static Set<String> descriptorNames(TensorDescriptor[] descriptors) {

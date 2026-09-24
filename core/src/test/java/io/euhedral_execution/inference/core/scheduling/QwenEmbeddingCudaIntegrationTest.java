@@ -6,7 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.euhedral_execution.core.generics.AbstractExecutor;
 import io.euhedral_execution.core.impl.DefaultExecutor;
 import io.euhedral_execution.inference.core.gpu.CudaGpuMemory;
-import io.euhedral_execution.inference.core.model_loader.QwenWeightLoader;
+import io.euhedral_execution.inference.core.model_loader.QwenModel;
 import io.euhedral_execution.inference.core.model_loader.QwenWeights;
 import io.euhedral_execution.inference.core.model_loader.artifact.CompactTensorLayout;
 import io.euhedral_execution.inference.core.model_loader.artifact.QwenArtifact;
@@ -26,7 +26,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -123,8 +122,8 @@ class QwenEmbeddingCudaIntegrationTest {
                     "insufficient free VRAM for compact model: free=" + beforeLoad.freeBytes() + ", model="
                             + expectedWeightBytes);
 
-            QwenWeights weights = QwenWeightLoader.load(compactPath, compactArtifact, gpu);
-            try {
+            try (QwenModel model = QwenModel.load(compactPath, compactArtifact, gpu)) {
+                QwenWeights weights = model.weights();
                 assertEquals(
                         compactArtifact.tensors().length,
                         weights.runtimeObjects().size());
@@ -158,8 +157,6 @@ class QwenEmbeddingCudaIntegrationTest {
                 assertTrue(
                         Math.abs(gpu.deviceMemoryInfo().freeBytes() - resident.freeBytes()) <= (16L << 20),
                         "submission completion changed model-weight residency");
-            } finally {
-                freeModelWeights(gpu, weights);
             }
 
             assertTrue(
@@ -309,15 +306,6 @@ class QwenEmbeddingCudaIntegrationTest {
                 maximumAbsoluteError <= MODEL_MAX_ABSOLUTE_TOLERANCE,
                 "Q3 embedding max absolute error " + maximumAbsoluteError);
         assertTrue(rootMeanSquareError <= MODEL_RMS_TOLERANCE, "Q3 embedding RMSE " + rootMeanSquareError);
-    }
-
-    private static void freeModelWeights(CudaGpuMemory gpu, QwenWeights weights) {
-        for (long address : new LinkedHashSet<>(weights.runtimeObjects().values().stream()
-                .mapToLong(tensor -> tensor.deviceAddress())
-                .boxed()
-                .toList())) {
-            gpu.free(address);
-        }
     }
 
     private static Path nativeLibraryPath() {

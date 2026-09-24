@@ -132,6 +132,11 @@ public final class QwenGenerationSession implements AutoCloseable {
         return this.closed.get();
     }
 
+    /// Allows the owning engine to reject reentrant shutdown from an output callback.
+    public boolean isGeneratingOnCurrentThread() {
+        return this.generationLock.isHeldByCurrentThread();
+    }
+
     QwenSequenceState sequenceState() {
         return this.sequence;
     }
