@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "cudaVersion": "13.1.80",
+  "products": [
+    {
+      "id": "linux-x64",
+      "zigTarget": "x86_64-linux-gnu",
+      "filename": "libeuhedral_cuda.so",
+      "driverLibrary": "cuda",
+      "cudaPlatform": "linux-x86_64",
+      "hostOs": "linux"
+    },
+    {
+      "id": "windows-x64",
+      "zigTarget": "x86_64-windows-gnu",
+      "filename": "euhedral_cuda.dll",
+      "driverLibrary": "cuda",
+      "cudaPlatform": "windows-x86_64",
+      "hostOs": "windows"
+    }
+  ],
+  "redistributables": {
+    "linux-x86_64": {
+      "crt": {
+        "path": "cuda_crt/linux-x86_64/cuda_crt-linux-x86_64-13.1.80-archive.tar.xz",
+        "sha256": "0e7c365d3301a1b486dbee600b833f6bc771b1a7cc660abca0923269023355ed"
+      },
+      "cccl": {
+        "path": "cuda_cccl/linux-x86_64/cuda_cccl-linux-x86_64-13.1.78-archive.tar.xz",
+        "sha256": "e23c8847aa429431d7eb4ccb87ded5eecaa6ba92f7b4bbab90c75c6141e635a2"
+      },
+      "cudart": {
+        "path": "cuda_cudart/linux-x86_64/cuda_cudart-linux-x86_64-13.1.80-archive.tar.xz",
+        "sha256": "b626f4790f46bc9324a1047f2fbcc9a42bc4a722b053056e61cc00da54ad6f32"
+      },
+      "nvrtc": {
+        "path": "cuda_nvrtc/linux-x86_64/cuda_nvrtc-linux-x86_64-13.1.80-archive.tar.xz",
+        "sha256": "e4250fe1b8d02fa324ecae50777ba6d23a74712a2a23eb6233fced170de876af"
+      }
+    },
+    "windows-x86_64": {
+      "crt": {
+        "path": "cuda_crt/windows-x86_64/cuda_crt-windows-x86_64-13.1.80-archive.zip",
+        "sha256": "2ec78bceeb343bad1e344ddcfbcd3ea9fb79dc6556657e98dd7fe62d8fddee86"
+      },
+      "cccl": {
+        "path": "cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-13.1.78-archive.zip",
+        "sha256": "3ca35d067652a5cd53f32a77f5e61dacd0cad193572866d2f04e7d0ce567ed43"
+      },
+      "cudart": {
+        "path": "cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-13.1.80-archive.zip",
+        "sha256": "e6f76dba2be1850a08168e90d868b12368aacb6c7d71871efb019f2d9648e877"
+      },
+      "nvrtc": {
+        "path": "cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-13.1.80-archive.zip",
+        "sha256": "7cafb794c68c11b3cd7d64a1d701638eeda227e031233e3d1e70f4e00f3b51c5"
+      }
+    }
+  }
+}

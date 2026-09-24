@@ -23,8 +23,8 @@
 #include <pthread.h>
 #endif
 
-#if !defined(CUDA_VERSION) || CUDA_VERSION != 13010
-#error "Euhedral CUDA ABI requires CUDA toolkit 13.1.x"
+#if !defined(CUDA_VERSION) || CUDA_VERSION < 13010
+#error "Euhedral CUDA ABI requires CUDA toolkit 13.1 or newer"
 #endif
 
 #ifndef PATH_MAX

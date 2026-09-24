@@ -1,0 +1,11 @@
+LIBRARY nvcuda.dll
+EXPORTS
+    cuInit
+    cuCtxGetCurrent
+    cuCtxGetCurrent_v2
+    cuModuleLoadData
+    cuModuleGetFunction
+    cuModuleUnload
+    cuGetErrorString
+    cuLaunchKernel
+    cuLaunchKernel_ptsz

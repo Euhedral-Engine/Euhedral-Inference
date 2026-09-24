@@ -1,0 +1,15 @@
+.git
+.gradle
+**/build
+native/.zig-cache
+native/zig-out
+**/__pycache__
+*.edrl
+*.safetensors
+*.gguf
+*.log
+.env
+.env.*
+**/.env
+**/.env.*
+.idea

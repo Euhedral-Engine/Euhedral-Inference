@@ -1,0 +1,47 @@
+name: CUDA native products
+
+on:
+  pull_request:
+    paths:
+      - "native/**"
+      - "native.gradle.kts"
+      - "build.gradle.kts"
+      - "api/build.gradle.kts"
+      - ".mise.toml"
+      - ".github/workflows/native-package.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cross-package:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+      - uses: gradle/actions/setup-gradle@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build both CUDA products and package Spring Boot
+        run: mise exec -- gradle nativeVerify :api:bootJar build
+      - name: Check ELF/PE targets, imports, and installed CUDA sources
+        run: python -m unittest discover -s native/tests -v
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cuda-native-${{ matrix.os }}
+          if-no-files-found: error
+          retention-days: 2
+          path: |
+            build/distributions/euhedral-cuda-native.zip
+            api/build/libs/euhedral-inference-api.jar

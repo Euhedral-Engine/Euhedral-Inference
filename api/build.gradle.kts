@@ -29,6 +29,10 @@ dependencies {
 }
 
 tasks.bootJar {
+    archiveFileName = "euhedral-inference-api.jar"
+    // The FFM loader requires a filesystem library beside the installed .cu sources.
+    // Produce the separate native distribution rather than embedding unusable files in the JAR.
+    dependsOn(rootProject.tasks.named("nativePackage"))
     manifest {
         attributes("Enable-Native-Access" to "ALL-UNNAMED")
     }

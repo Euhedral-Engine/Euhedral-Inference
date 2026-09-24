@@ -2,12 +2,15 @@
 
 #include <cuda.h>
 #include <cuda_runtime_api.h>
+#if !defined(CUDART_VERSION) || CUDART_VERSION < 13010
+#error "Euhedral CUDA requires CUDA headers 13.1 or newer"
+#endif
 
 #include <stddef.h>
 #include <stdint.h>
 
-#if !defined(CUDA_VERSION) || CUDA_VERSION != 13010
-#error "Euhedral CUDA ABI requires CUDA toolkit 13.1.x"
+#if !defined(CUDA_VERSION) || CUDA_VERSION < 13010
+#error "Euhedral CUDA ABI requires CUDA toolkit 13.1 or newer"
 #endif
 
 void* euhedral_cuda_malloc(uint64_t byte_size) {
