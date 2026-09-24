@@ -145,14 +145,31 @@ public final class QwenExecutionWorkspace implements AutoCloseable {
         return this.projectionAddresses[index];
     }
 
-    /// Returns a named layer-zero intermediate while this workspace is live.
+    /// Returns a named instruction-graph buffer while this workspace is live.
     public long address(QwenExecutionPlan.Buffer buffer) {
         Objects.requireNonNull(buffer, "buffer");
         long address = this.firstLayerAddresses[buffer.ordinal()];
         if (this.closed || address == 0) {
-            throw new IllegalStateException("layer-zero buffer is unavailable: " + buffer);
+            throw new IllegalStateException("instruction buffer is unavailable: " + buffer);
         }
         return address;
+    }
+
+    /// Transfers a named buffer to a caller that will release it independently of the workspace.
+    public long detachAddress(QwenExecutionPlan.Buffer buffer) {
+        Objects.requireNonNull(buffer, "buffer");
+        int index = buffer.ordinal();
+        long address = this.firstLayerAddresses[index];
+        if (this.closed || address == 0) {
+            throw new IllegalStateException("instruction buffer cannot be detached: " + buffer);
+        }
+        this.firstLayerAddresses[index] = 0;
+        return address;
+    }
+
+    public boolean hasBuffer(QwenExecutionPlan.Buffer buffer) {
+        Objects.requireNonNull(buffer, "buffer");
+        return !this.closed && this.firstLayerByteSizes[buffer.ordinal()] > 0;
     }
 
     public long address(QwenExecutionPlan.Buffer buffer, int index) {
@@ -160,7 +177,7 @@ public final class QwenExecutionWorkspace implements AutoCloseable {
             return projectionAddress(index);
         }
         if (index != 0) {
-            throw new IndexOutOfBoundsException("named layer-zero buffers are not indexed");
+            throw new IllegalStateException("named instruction buffers are not indexed");
         }
         return address(buffer);
     }
@@ -169,7 +186,7 @@ public final class QwenExecutionWorkspace implements AutoCloseable {
         Objects.requireNonNull(buffer, "buffer");
         long byteSize = this.firstLayerByteSizes[buffer.ordinal()];
         if (this.closed || byteSize == 0) {
-            throw new IllegalStateException("layer-zero buffer is unavailable: " + buffer);
+            throw new IllegalStateException("instruction buffer is unavailable: " + buffer);
         }
         return byteSize;
     }

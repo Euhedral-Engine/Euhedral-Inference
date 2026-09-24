@@ -36,12 +36,15 @@ class QwenSequenceStateTest {
         var state = new QwenSequenceState(25);
         var lease = state.claimExecution(0);
         var recurrentState = new CloseableState();
+        var kvCacheState = new CloseableState();
         state.setRecurrentState(lease, recurrentState);
+        state.setKvCacheState(lease, kvCacheState);
         state.releaseExecution(lease, 1);
 
         state.complete();
 
         assertEquals(1, recurrentState.closeCount);
+        assertEquals(1, kvCacheState.closeCount);
     }
 
     @Test

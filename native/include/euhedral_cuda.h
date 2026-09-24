@@ -33,6 +33,11 @@ EUHEDRAL_CUDA_EXPORT int euhedral_cuda_copy_device_to_host(
         const void* device_address,
         uint64_t byte_size);
 
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_copy_device_to_device(
+        void* destination_address,
+        const void* source_address,
+        uint64_t byte_size);
+
 EUHEDRAL_CUDA_EXPORT int euhedral_cuda_embed_q3(
         const int32_t* device_token_ids,
         const void* device_embedding_weights,
@@ -144,6 +149,43 @@ EUHEDRAL_CUDA_EXPORT int euhedral_cuda_swiglu_bf16(
         uint32_t intermediate_size);
 
 EUHEDRAL_CUDA_EXPORT int euhedral_cuda_zero_device_memory(void* device_address, uint64_t byte_size);
+
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_attention_qk_norm_rope_bf16(
+        const void* device_query_key,
+        const void* device_query_norm,
+        const void* device_key_norm,
+        void* device_output,
+        uint32_t rows,
+        uint32_t query_heads,
+        uint32_t key_value_heads,
+        uint32_t head_dim,
+        uint32_t rotary_dim,
+        uint64_t start_position,
+        float epsilon,
+        double rope_theta);
+
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_attention_kv_append_bf16(
+        const void* device_query_key,
+        const void* device_gate_value,
+        void* device_key_cache,
+        void* device_value_cache,
+        uint32_t rows,
+        uint32_t query_width,
+        uint32_t key_value_width,
+        uint64_t start_position);
+
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_attention_causal_bf16(
+        const void* device_query_key,
+        const void* device_gate_value,
+        const void* device_key_cache,
+        const void* device_value_cache,
+        void* device_output,
+        uint32_t rows,
+        uint32_t query_heads,
+        uint32_t key_value_heads,
+        uint32_t head_dim,
+        uint32_t cache_length,
+        uint64_t start_position);
 
 EUHEDRAL_CUDA_EXPORT int euhedral_cuda_synchronize(void);
 

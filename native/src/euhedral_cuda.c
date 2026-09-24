@@ -91,3 +91,15 @@ int euhedral_cuda_copy_device_to_host(
             cudaMemcpyDeviceToHost);
     return status == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int) status;
 }
+
+int euhedral_cuda_copy_device_to_device(
+        void* destination_address,
+        const void* source_address,
+        uint64_t byte_size) {
+    if (byte_size == 0) return EUHEDRAL_CUDA_SUCCESS;
+    if (destination_address == NULL || source_address == NULL) return EUHEDRAL_CUDA_INVALID_ARGUMENT;
+    if (byte_size > SIZE_MAX) return EUHEDRAL_CUDA_SIZE_OVERFLOW;
+    cudaError_t status = cudaMemcpy(
+            destination_address, source_address, (size_t)byte_size, cudaMemcpyDeviceToDevice);
+    return status == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int)status;
+}

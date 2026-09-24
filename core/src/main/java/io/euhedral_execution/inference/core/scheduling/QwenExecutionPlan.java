@@ -4,6 +4,7 @@ import io.euhedral_execution.inference.core.model_loader.QwenWeights;
 import io.euhedral_execution.inference.core.model_loader.artifact.CompactTensorLayout;
 import io.euhedral_execution.inference.core.model_loader.config.QwenConfig;
 import io.euhedral_execution.inference.core.model_loader.config.QwenLayerType;
+import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenCompactAttentionWeights;
 import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenCompactDenseFfnWeights;
 import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenCompactGatedDeltaNetWeights;
 import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenLayerWeights;
@@ -15,7 +16,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
-/// Immutable operation instructions and dependency edges for the loaded Qwen first text layer.
+/// Immutable operation instructions and dependency edges for the loaded Qwen text model.
 /// Model weights are borrowed; sequence state and quantum workspace have separate owners.
 public final class QwenExecutionPlan {
 
@@ -32,7 +33,10 @@ public final class QwenExecutionPlan {
         GDN_RECURRENCE,
         GDN_GATED_RMS_NORM,
         RESIDUAL_ADD,
-        SWIGLU
+        SWIGLU,
+        ATTENTION_QK_NORM_ROPE,
+        ATTENTION_KV_APPEND,
+        ATTENTION_CAUSAL
     }
 
     public enum Buffer {
@@ -49,11 +53,15 @@ public final class QwenExecutionPlan {
         GDN_CONVOLVED,
         GDN_RECURRENT,
         GDN_NORMALIZED,
+        ATTENTION_QK_NORMALIZED,
+        ATTENTION_CONTEXT,
         MIXER_DELTA,
         POST_MIXER_NORMALIZED,
         GATE_UP,
         SWIGLU,
         FFN_DELTA,
+        FINAL_NORMALIZED,
+        LOGITS,
         SLICE_PROJECTION
     }
 
@@ -62,13 +70,17 @@ public final class QwenExecutionPlan {
         FP32
     }
 
-    public record BufferSpec(Buffer buffer, int width, ElementType elementType) {
+    public record BufferSpec(Buffer buffer, int width, ElementType elementType, int storageSlot) {
         public BufferSpec {
             Objects.requireNonNull(buffer, "buffer");
             Objects.requireNonNull(elementType, "elementType");
-            if (width <= 0) {
+            if (width <= 0 || storageSlot < 0) {
                 throw new IllegalArgumentException("buffer width must be positive");
             }
+        }
+
+        public BufferSpec(Buffer buffer, int width, ElementType elementType) {
+            this(buffer, width, elementType, buffer.ordinal());
         }
     }
 
@@ -81,16 +93,40 @@ public final class QwenExecutionPlan {
             List<Buffer> outputBuffers,
             int inputWidth,
             int outputWidth,
-            int outputBufferIndex) {
+            int outputBufferIndex,
+            int layerIndex) {
         public Instruction {
             Objects.requireNonNull(kind, "kind");
             dependencies = List.copyOf(dependencies);
             weights = weights.stream().map(QwenExecutionPlan::copyHandle).toList();
             inputBuffers = List.copyOf(inputBuffers);
             outputBuffers = List.copyOf(outputBuffers);
-            if (id < 0 || inputWidth < 0 || outputWidth <= 0 || outputBufferIndex < -1) {
+            if (id < 0 || inputWidth < 0 || outputWidth < 0 || outputBufferIndex < -1 || layerIndex < -1) {
                 throw new IllegalArgumentException("invalid instruction dimensions");
             }
+        }
+
+        public Instruction(
+                int id,
+                Kind kind,
+                List<Integer> dependencies,
+                List<TensorHandle> weights,
+                List<Buffer> inputBuffers,
+                List<Buffer> outputBuffers,
+                int inputWidth,
+                int outputWidth,
+                int outputBufferIndex) {
+            this(
+                    id,
+                    kind,
+                    dependencies,
+                    weights,
+                    inputBuffers,
+                    outputBuffers,
+                    inputWidth,
+                    outputWidth,
+                    outputBufferIndex,
+                    -1);
         }
 
         public Instruction(int id, Kind kind, List<Integer> dependencies, TensorHandle weight, int outputWidth) {
@@ -103,6 +139,7 @@ public final class QwenExecutionPlan {
                     List.of(),
                     0,
                     outputWidth,
+                    -1,
                     -1);
         }
 
@@ -165,6 +202,34 @@ public final class QwenExecutionPlan {
         TensorHandle embedding =
                 validateQuantized(weights.tokenEmbedding(), vocabularySize, hiddenSize, WeightFormat.Q3_G64_FP16);
         return new QwenExecutionPlan(weights, embeddingOnly(embedding, hiddenSize));
+    }
+
+    /// Builds a dependency-graph prefix ending after the requested real layer, for staged validation.
+    public static QwenExecutionPlan prefix(QwenWeights weights, int layerCount) {
+        Objects.requireNonNull(weights, "weights");
+        if (layerCount <= 0 || layerCount > weights.config().numHiddenLayers()) {
+            throw new IllegalArgumentException("layerCount must select a non-empty model prefix");
+        }
+        QwenExecutionPlan fullPlan = new QwenExecutionPlan(weights);
+        int terminalId = -1;
+        for (Instruction instruction : fullPlan.instructions) {
+            if (instruction.layerIndex() == layerCount - 1
+                    && instruction.kind() == Kind.RESIDUAL_ADD
+                    && instruction.outputBuffers().contains(Buffer.FINAL_HIDDEN_STATE)) {
+                terminalId = instruction.id();
+            }
+        }
+        if (terminalId < 0) throw new IllegalArgumentException("requested layer prefix has no final residual");
+        List<Instruction> instructions = List.copyOf(fullPlan.instructions.subList(0, terminalId + 1));
+        boolean[] usedBuffers = new boolean[Buffer.values().length];
+        for (Instruction instruction : instructions) {
+            for (Buffer buffer : instruction.inputBuffers()) usedBuffers[buffer.ordinal()] = true;
+            for (Buffer buffer : instruction.outputBuffers()) usedBuffers[buffer.ordinal()] = true;
+        }
+        List<BufferSpec> buffers = fullPlan.bufferSpecs.stream()
+                .filter(spec -> usedBuffers[spec.buffer().ordinal()])
+                .toList();
+        return new QwenExecutionPlan(weights, new PlanData(instructions, List.of(), buffers, true));
     }
 
     /// A standalone operator slice retained for low-level operation validation.
@@ -246,7 +311,13 @@ public final class QwenExecutionPlan {
         if (layers == null || layers.length == 0) {
             return embeddingOnly(embedding, hiddenSize);
         }
-        return firstLayer(weights, embedding);
+        if (layers.length == 1 && layers[0] != null && layers[0].index() == 0) {
+            return firstLayer(weights, embedding);
+        }
+        if (layers.length != weights.config().numHiddenLayers()) {
+            throw new IllegalArgumentException("loaded weights do not contain every declared text layer");
+        }
+        return fullModel(weights, embedding);
     }
 
     private static PlanData embeddingOnly(TensorHandle embedding, int hiddenSize) {
@@ -488,6 +559,412 @@ public final class QwenExecutionPlan {
         return new PlanData(List.copyOf(nodes), List.of(), buffers, true);
     }
 
+    private static PlanData fullModel(QwenWeights weights, TensorHandle embedding) {
+        QwenConfig config = weights.config();
+        QwenLayerType[] layerTypes = config.layerTypes();
+        QwenLayerWeights[] layers = weights.layers();
+        int hidden = config.hiddenSize();
+        int intermediate = config.intermediateSize();
+        int queryHeads = config.numAttentionHeads();
+        int keyValueHeads = config.numKeyValueHeads();
+        int attentionHeadDim = config.attentionHeadDim();
+        int keyHeads = config.linearNumKeyHeads();
+        int valueHeads = config.linearNumValueHeads();
+        int keyHeadDim = config.linearKeyHeadDim();
+        int valueHeadDim = config.linearValueHeadDim();
+        int kernelWidth = config.linearConvKernelDim();
+        if (layerTypes == null
+                || layerTypes.length != config.numHiddenLayers()
+                || layers.length != config.numHiddenLayers()
+                || hidden <= 0
+                || hidden % 64 != 0
+                || intermediate <= 0
+                || queryHeads <= 0
+                || keyValueHeads <= 0
+                || queryHeads % keyValueHeads != 0
+                || attentionHeadDim <= 0
+                || !config.attentionOutputGate()
+                || !Double.isFinite(config.ropeTheta())
+                || config.ropeTheta() <= 0
+                || !Double.isFinite(config.partialRotaryFactor())
+                || config.partialRotaryFactor() <= 0
+                || config.partialRotaryFactor() > 1
+                || ((int) (attentionHeadDim * config.partialRotaryFactor())) <= 0
+                || ((int) (attentionHeadDim * config.partialRotaryFactor())) % 2 != 0
+                || keyHeads <= 0
+                || valueHeads <= 0
+                || valueHeads % keyHeads != 0
+                || keyHeadDim != 128
+                || valueHeadDim != 128
+                || kernelWidth < 2
+                || !Double.isFinite(config.rmsNormEpsilon())
+                || config.rmsNormEpsilon() <= 0) {
+            throw new IllegalArgumentException("unsupported Qwen text model geometry");
+        }
+
+        int attentionQueryWidth = Math.multiplyExact(queryHeads, attentionHeadDim);
+        int attentionKeyWidth = Math.multiplyExact(keyValueHeads, attentionHeadDim);
+        int attentionQkWidth = Math.addExact(attentionQueryWidth, attentionKeyWidth);
+        int attentionGateValueWidth = Math.addExact(attentionQueryWidth, attentionKeyWidth);
+        int gdnQueryKeyWidth = Math.multiplyExact(Math.multiplyExact(2, keyHeads), keyHeadDim);
+        int gdnValueWidth = Math.multiplyExact(valueHeads, valueHeadDim);
+        int gdnValueZWidth = Math.multiplyExact(2, gdnValueWidth);
+        int gdnConvolutionWidth = Math.addExact(gdnQueryKeyWidth, gdnValueWidth);
+
+        TensorHandle finalNorm = validateNorm(weights.finalNorm(), hidden);
+        TensorHandle outputHead =
+                validateQuantized(weights.lmHead(), config.vocabSize(), hidden, WeightFormat.Q3_G64_FP16);
+        List<Instruction> nodes = new ArrayList<>();
+        nodes.add(node(
+                0, Kind.EMBEDDING, List.of(), List.of(embedding), List.of(), List.of(Buffer.HIDDEN_STATE), 0, hidden));
+        int precedingLayer = 0;
+
+        for (int layerIndex = 0; layerIndex < layers.length; layerIndex++) {
+            QwenLayerWeights layer = layers[layerIndex];
+            if (layer == null || layer.index() != layerIndex) {
+                throw new IllegalArgumentException("loaded text layers must be indexed contiguously from zero");
+            }
+            if (!(layer.ffn() instanceof QwenCompactDenseFfnWeights ffn)) {
+                throw new IllegalArgumentException("all loaded text layers must use compact dense FFN weights");
+            }
+            TensorHandle inputNorm = validateNorm(layer.inputNorm(), hidden);
+            TensorHandle postNorm = validateNorm(layer.postAttentionNorm(), hidden);
+            Buffer layerInput = layerIndex == 0 ? Buffer.HIDDEN_STATE : Buffer.FINAL_HIDDEN_STATE;
+            int normId = addNode(
+                    nodes,
+                    Kind.RMS_NORM_UNIT_OFFSET,
+                    layerIndex,
+                    List.of(precedingLayer),
+                    List.of(inputNorm),
+                    List.of(layerInput),
+                    List.of(Buffer.INPUT_NORMALIZED),
+                    hidden,
+                    hidden);
+
+            int mixerProjectionId;
+            if (layerTypes[layerIndex] == QwenLayerType.GATED_DELTA_NET) {
+                if (!(layer.mixer() instanceof QwenCompactGatedDeltaNetWeights gdn)) {
+                    throw new IllegalArgumentException("declared GDN layer has incompatible compact weights");
+                }
+                TensorHandle aLog = validateFp32Vector(gdn.aLog(), valueHeads);
+                TensorHandle dtBias = validateFp32Vector(gdn.dtBias(), valueHeads);
+                TensorHandle convolution = validateBf16Matrix(gdn.convolution(), kernelWidth, gdnConvolutionWidth);
+                TensorHandle aProjection = validateBf16Matrix(gdn.aProjection(), valueHeads, hidden);
+                TensorHandle bProjection = validateBf16Matrix(gdn.bProjection(), valueHeads, hidden);
+                TensorHandle queryKey =
+                        validateQuantized(gdn.queryKey(), gdnQueryKeyWidth, hidden, WeightFormat.Q4_G64_FP16);
+                TensorHandle valueZ = validateQuantized(gdn.valueZ(), gdnValueZWidth, hidden, WeightFormat.Q5_G64_FP16);
+                TensorHandle gdnNorm = validateNorm(gdn.norm(), valueHeadDim);
+                TensorHandle gdnOutput =
+                        validateQuantized(gdn.output(), hidden, gdnValueWidth, WeightFormat.Q3_G64_FP16);
+
+                int queryKeyId = addNode(
+                        nodes,
+                        Kind.Q4_LINEAR,
+                        layerIndex,
+                        List.of(normId),
+                        List.of(queryKey),
+                        List.of(Buffer.INPUT_NORMALIZED),
+                        List.of(Buffer.QK_PROJECTED),
+                        hidden,
+                        gdnQueryKeyWidth);
+                int valueZId = addNode(
+                        nodes,
+                        Kind.Q5_LINEAR,
+                        layerIndex,
+                        List.of(normId),
+                        List.of(valueZ),
+                        List.of(Buffer.INPUT_NORMALIZED),
+                        List.of(Buffer.VALUE_Z_PROJECTED),
+                        hidden,
+                        gdnValueZWidth);
+                int aProjectionId = addNode(
+                        nodes,
+                        Kind.BF16_LINEAR,
+                        layerIndex,
+                        List.of(normId),
+                        List.of(aProjection),
+                        List.of(Buffer.INPUT_NORMALIZED),
+                        List.of(Buffer.A_PROJECTED),
+                        hidden,
+                        valueHeads);
+                int bProjectionId = addNode(
+                        nodes,
+                        Kind.BF16_LINEAR,
+                        layerIndex,
+                        List.of(normId),
+                        List.of(bProjection),
+                        List.of(Buffer.INPUT_NORMALIZED),
+                        List.of(Buffer.B_PROJECTED),
+                        hidden,
+                        valueHeads);
+                int controlId = addNode(
+                        nodes,
+                        Kind.GDN_CONTROL,
+                        layerIndex,
+                        List.of(aProjectionId, bProjectionId),
+                        List.of(aLog, dtBias),
+                        List.of(Buffer.A_PROJECTED, Buffer.B_PROJECTED),
+                        List.of(Buffer.GDN_G, Buffer.GDN_BETA),
+                        valueHeads,
+                        valueHeads);
+                int convolutionId = addNode(
+                        nodes,
+                        Kind.GDN_CONVOLUTION,
+                        layerIndex,
+                        List.of(queryKeyId, valueZId),
+                        List.of(convolution),
+                        List.of(Buffer.QK_PROJECTED, Buffer.VALUE_Z_PROJECTED),
+                        List.of(Buffer.GDN_CONVOLVED),
+                        gdnConvolutionWidth,
+                        gdnConvolutionWidth);
+                int recurrenceId = addNode(
+                        nodes,
+                        Kind.GDN_RECURRENCE,
+                        layerIndex,
+                        List.of(controlId, convolutionId),
+                        List.of(),
+                        List.of(Buffer.GDN_CONVOLVED, Buffer.GDN_G, Buffer.GDN_BETA),
+                        List.of(Buffer.GDN_RECURRENT),
+                        gdnConvolutionWidth,
+                        gdnValueWidth);
+                int gatedNormId = addNode(
+                        nodes,
+                        Kind.GDN_GATED_RMS_NORM,
+                        layerIndex,
+                        List.of(recurrenceId, valueZId),
+                        List.of(gdnNorm),
+                        List.of(Buffer.GDN_RECURRENT, Buffer.VALUE_Z_PROJECTED),
+                        List.of(Buffer.GDN_NORMALIZED),
+                        gdnValueWidth,
+                        gdnValueWidth);
+                mixerProjectionId = addNode(
+                        nodes,
+                        Kind.Q3_LINEAR,
+                        layerIndex,
+                        List.of(gatedNormId),
+                        List.of(gdnOutput),
+                        List.of(Buffer.GDN_NORMALIZED),
+                        List.of(Buffer.MIXER_DELTA),
+                        gdnValueWidth,
+                        hidden);
+            } else if (layerTypes[layerIndex] == QwenLayerType.FULL_ATTENTION) {
+                if (!(layer.mixer() instanceof QwenCompactAttentionWeights attention)) {
+                    throw new IllegalArgumentException(
+                            "declared full-attention layer has incompatible compact weights");
+                }
+                TensorHandle queryKey =
+                        validateQuantized(attention.queryKey(), attentionQkWidth, hidden, WeightFormat.Q4_G64_FP16);
+                TensorHandle gateValue = validateQuantized(
+                        attention.gateValue(), attentionGateValueWidth, hidden, WeightFormat.Q5_G64_FP16);
+                TensorHandle queryNorm = validateNorm(attention.queryNorm(), attentionHeadDim);
+                TensorHandle keyNorm = validateNorm(attention.keyNorm(), attentionHeadDim);
+                TensorHandle attentionOutput =
+                        validateQuantized(attention.output(), hidden, attentionQueryWidth, WeightFormat.Q3_G64_FP16);
+
+                int queryKeyId = addNode(
+                        nodes,
+                        Kind.Q4_LINEAR,
+                        layerIndex,
+                        List.of(normId),
+                        List.of(queryKey),
+                        List.of(Buffer.INPUT_NORMALIZED),
+                        List.of(Buffer.QK_PROJECTED),
+                        hidden,
+                        attentionQkWidth);
+                int gateValueId = addNode(
+                        nodes,
+                        Kind.Q5_LINEAR,
+                        layerIndex,
+                        List.of(normId),
+                        List.of(gateValue),
+                        List.of(Buffer.INPUT_NORMALIZED),
+                        List.of(Buffer.VALUE_Z_PROJECTED),
+                        hidden,
+                        attentionGateValueWidth);
+                int qkNormRopeId = addNode(
+                        nodes,
+                        Kind.ATTENTION_QK_NORM_ROPE,
+                        layerIndex,
+                        List.of(queryKeyId),
+                        List.of(queryNorm, keyNorm),
+                        List.of(Buffer.QK_PROJECTED),
+                        List.of(Buffer.ATTENTION_QK_NORMALIZED),
+                        attentionQkWidth,
+                        attentionQkWidth);
+                int kvAppendId = addNode(
+                        nodes,
+                        Kind.ATTENTION_KV_APPEND,
+                        layerIndex,
+                        List.of(qkNormRopeId, gateValueId),
+                        List.of(),
+                        List.of(Buffer.ATTENTION_QK_NORMALIZED, Buffer.VALUE_Z_PROJECTED),
+                        List.of(),
+                        attentionQkWidth + attentionGateValueWidth,
+                        0);
+                int attentionId = addNode(
+                        nodes,
+                        Kind.ATTENTION_CAUSAL,
+                        layerIndex,
+                        List.of(qkNormRopeId, gateValueId, kvAppendId),
+                        List.of(),
+                        List.of(Buffer.ATTENTION_QK_NORMALIZED, Buffer.VALUE_Z_PROJECTED),
+                        List.of(Buffer.ATTENTION_CONTEXT),
+                        attentionQkWidth + attentionGateValueWidth,
+                        attentionQueryWidth);
+                mixerProjectionId = addNode(
+                        nodes,
+                        Kind.Q3_LINEAR,
+                        layerIndex,
+                        List.of(attentionId),
+                        List.of(attentionOutput),
+                        List.of(Buffer.ATTENTION_CONTEXT),
+                        List.of(Buffer.MIXER_DELTA),
+                        attentionQueryWidth,
+                        hidden);
+            } else {
+                throw new IllegalArgumentException("unsupported declared Qwen layer type at " + layerIndex);
+            }
+
+            int mixerResidualId = addNode(
+                    nodes,
+                    Kind.RESIDUAL_ADD,
+                    layerIndex,
+                    List.of(precedingLayer, mixerProjectionId),
+                    List.of(),
+                    List.of(layerInput, Buffer.MIXER_DELTA),
+                    List.of(Buffer.MIXER_HIDDEN),
+                    hidden,
+                    hidden);
+            int postNormId = addNode(
+                    nodes,
+                    Kind.RMS_NORM_UNIT_OFFSET,
+                    layerIndex,
+                    List.of(mixerResidualId),
+                    List.of(postNorm),
+                    List.of(Buffer.MIXER_HIDDEN),
+                    List.of(Buffer.POST_MIXER_NORMALIZED),
+                    hidden,
+                    hidden);
+            TensorHandle gateUp = validateQuantized(
+                    ffn.gateUp(), Math.multiplyExact(2, intermediate), hidden, WeightFormat.Q3_G64_FP16);
+            TensorHandle down = validateQuantized(ffn.down(), hidden, intermediate, WeightFormat.Q3_G64_FP16);
+            int gateUpId = addNode(
+                    nodes,
+                    Kind.Q3_LINEAR,
+                    layerIndex,
+                    List.of(postNormId),
+                    List.of(gateUp),
+                    List.of(Buffer.POST_MIXER_NORMALIZED),
+                    List.of(Buffer.GATE_UP),
+                    hidden,
+                    2 * intermediate);
+            int swigluId = addNode(
+                    nodes,
+                    Kind.SWIGLU,
+                    layerIndex,
+                    List.of(gateUpId),
+                    List.of(),
+                    List.of(Buffer.GATE_UP),
+                    List.of(Buffer.SWIGLU),
+                    2 * intermediate,
+                    intermediate);
+            int downId = addNode(
+                    nodes,
+                    Kind.Q3_LINEAR,
+                    layerIndex,
+                    List.of(swigluId),
+                    List.of(down),
+                    List.of(Buffer.SWIGLU),
+                    List.of(Buffer.FFN_DELTA),
+                    intermediate,
+                    hidden);
+            precedingLayer = addNode(
+                    nodes,
+                    Kind.RESIDUAL_ADD,
+                    layerIndex,
+                    List.of(mixerResidualId, downId),
+                    List.of(),
+                    List.of(Buffer.MIXER_HIDDEN, Buffer.FFN_DELTA),
+                    List.of(Buffer.FINAL_HIDDEN_STATE),
+                    hidden,
+                    hidden);
+        }
+
+        int finalNormId = addNode(
+                nodes,
+                Kind.RMS_NORM_UNIT_OFFSET,
+                -1,
+                List.of(precedingLayer),
+                List.of(finalNorm),
+                List.of(Buffer.FINAL_HIDDEN_STATE),
+                List.of(Buffer.FINAL_NORMALIZED),
+                hidden,
+                hidden);
+        addNode(
+                nodes,
+                Kind.Q3_LINEAR,
+                -1,
+                List.of(finalNormId),
+                List.of(outputHead),
+                List.of(Buffer.FINAL_NORMALIZED),
+                List.of(Buffer.LOGITS),
+                hidden,
+                config.vocabSize());
+
+        return new PlanData(
+                List.copyOf(nodes),
+                List.of(),
+                fullBufferSpecs(
+                        hidden,
+                        intermediate,
+                        config.vocabSize(),
+                        Math.max(gdnQueryKeyWidth, attentionQkWidth),
+                        Math.max(gdnValueZWidth, attentionGateValueWidth),
+                        valueHeads,
+                        gdnConvolutionWidth,
+                        gdnValueWidth,
+                        attentionQkWidth,
+                        attentionQueryWidth),
+                true);
+    }
+
+    private static List<BufferSpec> fullBufferSpecs(
+            int hidden,
+            int intermediate,
+            int vocabulary,
+            int queryKeyWidth,
+            int valueZWidth,
+            int valueHeads,
+            int convolutionWidth,
+            int valueWidth,
+            int attentionQkWidth,
+            int attentionQueryWidth) {
+        return List.of(
+                spec(Buffer.HIDDEN_STATE, hidden, ElementType.BF16),
+                spec(Buffer.MIXER_HIDDEN, hidden, ElementType.BF16),
+                spec(Buffer.FINAL_HIDDEN_STATE, hidden, ElementType.BF16),
+                spec(Buffer.INPUT_NORMALIZED, hidden, ElementType.BF16),
+                spec(Buffer.QK_PROJECTED, queryKeyWidth, ElementType.BF16),
+                spec(Buffer.VALUE_Z_PROJECTED, valueZWidth, ElementType.BF16),
+                spec(Buffer.A_PROJECTED, valueHeads, ElementType.FP32),
+                spec(Buffer.B_PROJECTED, valueHeads, ElementType.FP32),
+                spec(Buffer.GDN_G, valueHeads, ElementType.FP32),
+                spec(Buffer.GDN_BETA, valueHeads, ElementType.FP32),
+                spec(Buffer.GDN_CONVOLVED, convolutionWidth, ElementType.BF16),
+                spec(Buffer.GDN_RECURRENT, valueWidth, ElementType.BF16),
+                spec(Buffer.GDN_NORMALIZED, valueWidth, ElementType.BF16),
+                spec(Buffer.ATTENTION_QK_NORMALIZED, attentionQkWidth, ElementType.BF16),
+                spec(Buffer.ATTENTION_CONTEXT, attentionQueryWidth, ElementType.BF16),
+                spec(Buffer.MIXER_DELTA, hidden, ElementType.BF16),
+                spec(Buffer.POST_MIXER_NORMALIZED, hidden, ElementType.BF16),
+                spec(Buffer.GATE_UP, 2 * intermediate, ElementType.BF16),
+                spec(Buffer.SWIGLU, intermediate, ElementType.BF16),
+                spec(Buffer.FFN_DELTA, hidden, ElementType.BF16),
+                spec(Buffer.FINAL_NORMALIZED, hidden, ElementType.BF16),
+                spec(Buffer.LOGITS, vocabulary, ElementType.BF16));
+    }
+
     private static PlanData operatorSlice(
             QwenWeights weights, TensorHandle normWeight, List<TensorHandle> projections) {
         Objects.requireNonNull(weights.config(), "config");
@@ -558,6 +1035,22 @@ public final class QwenExecutionPlan {
             int inputWidth,
             int outputWidth) {
         return new Instruction(id, kind, dependencies, weights, inputs, outputs, inputWidth, outputWidth, -1);
+    }
+
+    private static int addNode(
+            List<Instruction> nodes,
+            Kind kind,
+            int layerIndex,
+            List<Integer> dependencies,
+            List<TensorHandle> weights,
+            List<Buffer> inputs,
+            List<Buffer> outputs,
+            int inputWidth,
+            int outputWidth) {
+        int id = nodes.size();
+        nodes.add(new Instruction(
+                id, kind, dependencies, weights, inputs, outputs, inputWidth, outputWidth, -1, layerIndex));
+        return id;
     }
 
     private static BufferSpec spec(Buffer buffer, int width, ElementType type) {

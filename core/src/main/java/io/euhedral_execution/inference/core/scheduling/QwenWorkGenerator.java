@@ -62,7 +62,10 @@ public final class QwenWorkGenerator {
                     || instruction.kind() == QwenExecutionPlan.Kind.GDN_RECURRENCE
                     || instruction.kind() == QwenExecutionPlan.Kind.GDN_GATED_RMS_NORM
                     || instruction.kind() == QwenExecutionPlan.Kind.RESIDUAL_ADD
-                    || instruction.kind() == QwenExecutionPlan.Kind.SWIGLU) {
+                    || instruction.kind() == QwenExecutionPlan.Kind.SWIGLU
+                    || instruction.kind() == QwenExecutionPlan.Kind.ATTENTION_QK_NORM_ROPE
+                    || instruction.kind() == QwenExecutionPlan.Kind.ATTENTION_KV_APPEND
+                    || instruction.kind() == QwenExecutionPlan.Kind.ATTENTION_CAUSAL) {
                 operationManagers.put(instruction.id(), operationManager(instruction));
             }
         }
@@ -217,7 +220,15 @@ public final class QwenWorkGenerator {
             case Q3_LINEAR, Q4_LINEAR, Q5_LINEAR, BF16_LINEAR ->
                 Objects.requireNonNull(this.linearFrames.get(instruction.id()))
                         .getOrCreate(context, FRAME_POOL_PASSWORD);
-            case GDN_CONTROL, GDN_CONVOLUTION, GDN_RECURRENCE, GDN_GATED_RMS_NORM, RESIDUAL_ADD, SWIGLU ->
+            case GDN_CONTROL,
+                    GDN_CONVOLUTION,
+                    GDN_RECURRENCE,
+                    GDN_GATED_RMS_NORM,
+                    RESIDUAL_ADD,
+                    SWIGLU,
+                    ATTENTION_QK_NORM_ROPE,
+                    ATTENTION_KV_APPEND,
+                    ATTENTION_CAUSAL ->
                 Objects.requireNonNull(this.operationFrames.get(instruction.id()))
                         .getOrCreate(context, FRAME_POOL_PASSWORD);
         };

@@ -328,18 +328,28 @@ public final class QwenSequenceState {
     }
 
     private static void closePersistentRecurrentState(State terminalState) {
-        if (!(terminalState.recurrentState() instanceof AutoCloseable recurrentState)) {
+        Throwable cleanupFailure = closeResource(terminalState.recurrentState(), null);
+        if (terminalState.kvCacheState() != terminalState.recurrentState()) {
+            cleanupFailure = closeResource(terminalState.kvCacheState(), cleanupFailure);
+        }
+        if (cleanupFailure == null) return;
+        Throwable terminalFailure = terminalState.terminalFailure();
+        if (terminalFailure != null) {
+            terminalFailure.addSuppressed(cleanupFailure);
             return;
         }
+        throw new IllegalStateException("Unable to release persistent Qwen sequence state", cleanupFailure);
+    }
+
+    private static Throwable closeResource(Object resource, Throwable priorFailure) {
+        if (!(resource instanceof AutoCloseable closeable)) return priorFailure;
         try {
-            recurrentState.close();
-        } catch (Exception cleanupFailure) {
-            Throwable terminalFailure = terminalState.terminalFailure();
-            if (terminalFailure != null) {
-                terminalFailure.addSuppressed(cleanupFailure);
-                return;
-            }
-            throw new IllegalStateException("Unable to release persistent recurrent state", cleanupFailure);
+            closeable.close();
+            return priorFailure;
+        } catch (Throwable cleanupFailure) {
+            if (priorFailure != null) priorFailure.addSuppressed(cleanupFailure);
+            else priorFailure = cleanupFailure;
+            return priorFailure;
         }
     }
 

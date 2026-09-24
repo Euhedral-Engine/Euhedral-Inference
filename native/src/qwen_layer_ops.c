@@ -18,9 +18,11 @@ static pthread_once_t once = PTHREAD_ONCE_INIT;
 static int quantized_anchor;
 static int gdn_anchor;
 static int elementwise_anchor;
+static int attention_anchor;
 static CUmodule quantized_module;
 static CUmodule gdn_module;
 static CUmodule elementwise_module;
+static CUmodule attention_module;
 static CUfunction linear_quantized;
 static CUfunction linear_bf16_to_float;
 static CUfunction gdn_control;
@@ -29,6 +31,9 @@ static CUfunction gdn_recurrence;
 static CUfunction gdn_gated_rms_norm;
 static CUfunction residual_add;
 static CUfunction swiglu;
+static CUfunction attention_qk_norm_rope;
+static CUfunction attention_kv_append;
+static CUfunction attention_causal;
 static int init_status = EUHEDRAL_CUDA_KERNEL_UNAVAILABLE;
 
 static int get_function(CUmodule module, CUfunction* function, const char* name) {
@@ -56,6 +61,18 @@ static void initialize(void) {
             &elementwise_anchor, "qwen_elementwise.cu", "euhedral_residual_add_bf16", &elementwise_module, &residual_add);
     if (init_status != EUHEDRAL_CUDA_SUCCESS) return;
     status = get_function(elementwise_module, &swiglu, "euhedral_swiglu_bf16");
+    if (status != CUDA_SUCCESS) { init_status = (int)status; return; }
+
+    init_status = euhedral_cuda_load_kernel(
+            &attention_anchor,
+            "qwen_attention_ops.cu",
+            "euhedral_attention_qk_norm_rope_bf16",
+            &attention_module,
+            &attention_qk_norm_rope);
+    if (init_status != EUHEDRAL_CUDA_SUCCESS) return;
+    status = get_function(attention_module, &attention_kv_append, "euhedral_attention_kv_append_bf16");
+    if (status != CUDA_SUCCESS) { init_status = (int)status; return; }
+    status = get_function(attention_module, &attention_causal, "euhedral_attention_causal_bf16");
     init_status = status == CUDA_SUCCESS ? EUHEDRAL_CUDA_SUCCESS : (int)status;
 }
 
@@ -294,4 +311,105 @@ int euhedral_cuda_zero_device_memory(void* device_address, uint64_t byte_size) {
     if (result != cudaSuccess) return (int)result;
     result = cudaDeviceSynchronize();
     return result == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int)result;
+}
+
+int euhedral_cuda_attention_qk_norm_rope_bf16(
+        const void* device_query_key,
+        const void* device_query_norm,
+        const void* device_key_norm,
+        void* device_output,
+        uint32_t rows,
+        uint32_t query_heads,
+        uint32_t key_value_heads,
+        uint32_t head_dim,
+        uint32_t rotary_dim,
+        uint64_t start_position,
+        float epsilon,
+        double rope_theta) {
+    if (device_query_key == NULL || device_query_norm == NULL || device_key_norm == NULL || device_output == NULL
+            || rows == 0 || query_heads == 0 || key_value_heads == 0 || query_heads % key_value_heads != 0
+            || head_dim != 256 || rotary_dim == 0 || rotary_dim > head_dim || (rotary_dim & 1) != 0
+            || start_position > UINT64_MAX - rows || !isfinite(epsilon) || epsilon <= 0.0f
+            || !isfinite(rope_theta) || rope_theta <= 0.0)
+        return EUHEDRAL_CUDA_INVALID_ARGUMENT;
+    const uint64_t heads = (uint64_t)query_heads + key_value_heads;
+    const uint64_t blocks = (uint64_t)rows * heads;
+    if (heads > UINT32_MAX || blocks > UINT32_MAX) return EUHEDRAL_CUDA_SIZE_OVERFLOW;
+    int status = euhedral_cuda_bind_thread_context();
+    if (status != EUHEDRAL_CUDA_SUCCESS) return status;
+    status = ensure_initialized();
+    if (status != EUHEDRAL_CUDA_SUCCESS) return status;
+    CUdeviceptr query_key = (CUdeviceptr)(uintptr_t)device_query_key;
+    CUdeviceptr query_norm = (CUdeviceptr)(uintptr_t)device_query_norm;
+    CUdeviceptr key_norm = (CUdeviceptr)(uintptr_t)device_key_norm;
+    CUdeviceptr output = (CUdeviceptr)(uintptr_t)device_output;
+    uint32_t rows_arg = rows, query_heads_arg = query_heads, key_value_heads_arg = key_value_heads;
+    uint32_t head_dim_arg = head_dim, rotary_dim_arg = rotary_dim;
+    void* parameters[] = {&query_key, &query_norm, &key_norm, &output, &rows_arg, &query_heads_arg,
+            &key_value_heads_arg, &head_dim_arg, &rotary_dim_arg, &start_position, &epsilon, &rope_theta};
+    return launch_and_synchronize(attention_qk_norm_rope, (uint32_t)blocks, head_dim, parameters);
+}
+
+int euhedral_cuda_attention_kv_append_bf16(
+        const void* device_query_key,
+        const void* device_gate_value,
+        void* device_key_cache,
+        void* device_value_cache,
+        uint32_t rows,
+        uint32_t query_width,
+        uint32_t key_value_width,
+        uint64_t start_position) {
+    if (device_query_key == NULL || device_gate_value == NULL || device_key_cache == NULL || device_value_cache == NULL
+            || rows == 0 || query_width == 0 || key_value_width == 0 || query_width % key_value_width != 0
+            || start_position > UINT64_MAX - rows)
+        return EUHEDRAL_CUDA_INVALID_ARGUMENT;
+    const uint64_t count = (uint64_t)rows * key_value_width;
+    if (count > UINT32_MAX) return EUHEDRAL_CUDA_SIZE_OVERFLOW;
+    int status = euhedral_cuda_bind_thread_context();
+    if (status != EUHEDRAL_CUDA_SUCCESS) return status;
+    status = ensure_initialized();
+    if (status != EUHEDRAL_CUDA_SUCCESS) return status;
+    CUdeviceptr query_key = (CUdeviceptr)(uintptr_t)device_query_key;
+    CUdeviceptr gate_value = (CUdeviceptr)(uintptr_t)device_gate_value;
+    CUdeviceptr key_cache = (CUdeviceptr)(uintptr_t)device_key_cache;
+    CUdeviceptr value_cache = (CUdeviceptr)(uintptr_t)device_value_cache;
+    uint32_t rows_arg = rows, query_width_arg = query_width, key_value_width_arg = key_value_width;
+    void* parameters[] = {&query_key, &gate_value, &key_cache, &value_cache,
+            &rows_arg, &query_width_arg, &key_value_width_arg, &start_position};
+    return launch_and_synchronize(attention_kv_append, (uint32_t)((count + 255) / 256), 256, parameters);
+}
+
+int euhedral_cuda_attention_causal_bf16(
+        const void* device_query_key,
+        const void* device_gate_value,
+        const void* device_key_cache,
+        const void* device_value_cache,
+        void* device_output,
+        uint32_t rows,
+        uint32_t query_heads,
+        uint32_t key_value_heads,
+        uint32_t head_dim,
+        uint32_t cache_length,
+        uint64_t start_position) {
+    if (device_query_key == NULL || device_gate_value == NULL || device_key_cache == NULL || device_value_cache == NULL
+            || device_output == NULL || rows == 0 || query_heads == 0 || key_value_heads == 0
+            || query_heads % key_value_heads != 0 || head_dim != 256 || cache_length == 0
+            || start_position > UINT64_MAX - rows || start_position + rows > cache_length)
+        return EUHEDRAL_CUDA_INVALID_ARGUMENT;
+    const uint64_t blocks = (uint64_t)rows * query_heads;
+    if (blocks > UINT32_MAX) return EUHEDRAL_CUDA_SIZE_OVERFLOW;
+    int status = euhedral_cuda_bind_thread_context();
+    if (status != EUHEDRAL_CUDA_SUCCESS) return status;
+    status = ensure_initialized();
+    if (status != EUHEDRAL_CUDA_SUCCESS) return status;
+    CUdeviceptr query_key = (CUdeviceptr)(uintptr_t)device_query_key;
+    CUdeviceptr gate_value = (CUdeviceptr)(uintptr_t)device_gate_value;
+    CUdeviceptr key_cache = (CUdeviceptr)(uintptr_t)device_key_cache;
+    CUdeviceptr value_cache = (CUdeviceptr)(uintptr_t)device_value_cache;
+    CUdeviceptr output = (CUdeviceptr)(uintptr_t)device_output;
+    uint32_t rows_arg = rows, query_heads_arg = query_heads, key_value_heads_arg = key_value_heads;
+    uint32_t head_dim_arg = head_dim, cache_length_arg = cache_length;
+    void* parameters[] = {&query_key, &gate_value, &key_cache, &value_cache, &output, &rows_arg,
+            &query_heads_arg, &key_value_heads_arg, &head_dim_arg, &cache_length_arg, &start_position};
+    return launch_and_synchronize(attention_causal, (uint32_t)blocks, head_dim, parameters);
 }

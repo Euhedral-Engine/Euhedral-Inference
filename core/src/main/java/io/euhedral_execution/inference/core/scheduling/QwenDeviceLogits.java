@@ -1,0 +1,61 @@
+package io.euhedral_execution.inference.core.scheduling;
+
+import io.euhedral_execution.inference.core.gpu.ExecutionGpu;
+import java.lang.foreign.MemorySegment;
+import java.util.Objects;
+
+/// Caller-owned BF16 logits retained on the GPU after a quantum workspace is released.
+public final class QwenDeviceLogits implements AutoCloseable {
+
+    private final ExecutionGpu gpu;
+    private final int tokenCount;
+    private final int vocabularySize;
+    private long deviceAddress;
+
+    QwenDeviceLogits(ExecutionGpu gpu, long deviceAddress, int tokenCount, int vocabularySize) {
+        this.gpu = Objects.requireNonNull(gpu, "gpu");
+        if (deviceAddress == 0) throw new IllegalArgumentException("deviceAddress must not be null");
+        if (tokenCount <= 0 || vocabularySize <= 0)
+            throw new IllegalArgumentException("logit dimensions must be positive");
+        this.deviceAddress = deviceAddress;
+        this.tokenCount = tokenCount;
+        this.vocabularySize = vocabularySize;
+    }
+
+    public long deviceAddress() {
+        ensureOpen();
+        return this.deviceAddress;
+    }
+
+    public int tokenCount() {
+        return this.tokenCount;
+    }
+
+    public int vocabularySize() {
+        return this.vocabularySize;
+    }
+
+    public long byteSize() {
+        return Math.multiplyExact(Math.multiplyExact((long) this.tokenCount, this.vocabularySize), Short.BYTES);
+    }
+
+    /// Copies logits to caller-provided host storage; the device allocation remains owned by this object.
+    public void copyToHost(MemorySegment destination) {
+        Objects.requireNonNull(destination, "destination");
+        ensureOpen();
+        if (destination.byteSize() < byteSize())
+            throw new IllegalArgumentException("destination is too small for logits");
+        this.gpu.copyDeviceToHost(destination, this.deviceAddress, byteSize());
+    }
+
+    @Override
+    public void close() {
+        if (this.deviceAddress == 0) return;
+        this.gpu.free(this.deviceAddress);
+        this.deviceAddress = 0;
+    }
+
+    private void ensureOpen() {
+        if (this.deviceAddress == 0) throw new IllegalStateException("Qwen logits have been released");
+    }
+}

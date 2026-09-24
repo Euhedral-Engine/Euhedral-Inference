@@ -119,6 +119,43 @@ public abstract class ExecutionGpu implements GpuMemory {
             ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT);
     protected static final FunctionDescriptor ZERO_DEVICE_MEMORY =
             FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG);
+    protected static final FunctionDescriptor ATTENTION_QK_NORM_ROPE_BF16 = FunctionDescriptor.of(
+            ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,
+            ValueLayout.ADDRESS,
+            ValueLayout.ADDRESS,
+            ValueLayout.ADDRESS,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_LONG,
+            ValueLayout.JAVA_FLOAT,
+            ValueLayout.JAVA_DOUBLE);
+    protected static final FunctionDescriptor ATTENTION_KV_APPEND_BF16 = FunctionDescriptor.of(
+            ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,
+            ValueLayout.ADDRESS,
+            ValueLayout.ADDRESS,
+            ValueLayout.ADDRESS,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_LONG);
+    protected static final FunctionDescriptor ATTENTION_CAUSAL_BF16 = FunctionDescriptor.of(
+            ValueLayout.JAVA_INT,
+            ValueLayout.ADDRESS,
+            ValueLayout.ADDRESS,
+            ValueLayout.ADDRESS,
+            ValueLayout.ADDRESS,
+            ValueLayout.ADDRESS,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_INT,
+            ValueLayout.JAVA_LONG);
     protected static final int CUDA_FORMAT_MISMATCH = -3;
 
     protected static MethodHandle bind(
@@ -254,5 +291,51 @@ public abstract class ExecutionGpu implements GpuMemory {
 
     public void zeroDeviceMemory(long address, long byteSize) {
         throw new UnsupportedOperationException("device memory zeroing is not implemented by this GPU");
+    }
+
+    /// Applies per-head Q/K RMSNorm and partial RoPE to one compact projection result.
+    public void attentionQkNormRopeBf16(
+            long queryKeyAddress,
+            long queryNormAddress,
+            long keyNormAddress,
+            long outputAddress,
+            int rows,
+            int queryHeads,
+            int keyValueHeads,
+            int headDim,
+            int rotaryDim,
+            long startPosition,
+            float epsilon,
+            double ropeTheta) {
+        throw new UnsupportedOperationException("Qwen attention Q/K normalization and RoPE are not implemented");
+    }
+
+    /// Appends the current compact K/V projections to one layer's sequence-owned cache.
+    public void attentionKvAppendBf16(
+            long queryKeyAddress,
+            long gateValueAddress,
+            long keyCacheAddress,
+            long valueCacheAddress,
+            int rows,
+            int queryWidth,
+            int keyValueWidth,
+            long startPosition) {
+        throw new UnsupportedOperationException("Qwen attention KV append is not implemented");
+    }
+
+    /// Evaluates causal GQA against the already-appended cache and applies the Q gate.
+    public void attentionCausalBf16(
+            long queryKeyAddress,
+            long gateValueAddress,
+            long keyCacheAddress,
+            long valueCacheAddress,
+            long outputAddress,
+            int rows,
+            int queryHeads,
+            int keyValueHeads,
+            int headDim,
+            int cacheLength,
+            long startPosition) {
+        throw new UnsupportedOperationException("Qwen causal attention is not implemented");
     }
 }

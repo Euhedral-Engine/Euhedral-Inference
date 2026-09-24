@@ -11,5 +11,9 @@ public interface GpuMemory {
 
     void copyDeviceToHost(MemorySegment destination, long source, long byteSize);
 
+    default void copyDeviceToDevice(long destination, long source, long byteSize) {
+        throw new UnsupportedOperationException("device-to-device copy is not implemented by this GPU memory provider");
+    }
+
     void free(long address);
 }

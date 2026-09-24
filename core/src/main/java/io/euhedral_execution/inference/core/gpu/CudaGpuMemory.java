@@ -21,6 +21,7 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
     private final MethodHandle deviceMemoryInfo;
     private final MethodHandle copyHostToDevice;
     private final MethodHandle copyDeviceToHost;
+    private final MethodHandle copyDeviceToDevice;
     private final MethodHandle embedQ3;
     private final MethodHandle synchronize;
     private final MethodHandle rmsNormBf16;
@@ -35,6 +36,9 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
     private final MethodHandle residualAddBf16;
     private final MethodHandle swiGluBf16;
     private final MethodHandle zeroDeviceMemory;
+    private final MethodHandle attentionQkNormRopeBf16;
+    private final MethodHandle attentionKvAppendBf16;
+    private final MethodHandle attentionCausalBf16;
     private boolean closed;
 
     public CudaGpuMemory(Path libraryPath) {
@@ -49,6 +53,7 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
             this.deviceMemoryInfo = bind(linker, symbols, "euhedral_cuda_device_memory_info", DEVICE_MEMORY_INFO);
             this.copyHostToDevice = bind(linker, symbols, "euhedral_cuda_copy_host_to_device", COPY);
             this.copyDeviceToHost = bind(linker, symbols, "euhedral_cuda_copy_device_to_host", COPY);
+            this.copyDeviceToDevice = bind(linker, symbols, "euhedral_cuda_copy_device_to_device", COPY);
             this.embedQ3 = bind(linker, symbols, "euhedral_cuda_embed_q3", EMBED_Q3);
             this.synchronize = bind(linker, symbols, "euhedral_cuda_synchronize", SYNCHRONIZE);
             this.rmsNormBf16 = bind(linker, symbols, "euhedral_cuda_rms_norm_bf16", RMS_NORM_BF16);
@@ -66,6 +71,12 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
             this.residualAddBf16 = bind(linker, symbols, "euhedral_cuda_residual_add_bf16", RESIDUAL_ADD_BF16);
             this.swiGluBf16 = bind(linker, symbols, "euhedral_cuda_swiglu_bf16", SWIGLU_BF16);
             this.zeroDeviceMemory = bind(linker, symbols, "euhedral_cuda_zero_device_memory", ZERO_DEVICE_MEMORY);
+            this.attentionQkNormRopeBf16 =
+                    bind(linker, symbols, "euhedral_cuda_attention_qk_norm_rope_bf16", ATTENTION_QK_NORM_ROPE_BF16);
+            this.attentionKvAppendBf16 =
+                    bind(linker, symbols, "euhedral_cuda_attention_kv_append_bf16", ATTENTION_KV_APPEND_BF16);
+            this.attentionCausalBf16 =
+                    bind(linker, symbols, "euhedral_cuda_attention_causal_bf16", ATTENTION_CAUSAL_BF16);
         } catch (RuntimeException exception) {
             loadedLibraryArena.close();
             throw exception;
@@ -106,6 +117,20 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
         int status = invokeCopy(
                 copyDeviceToHost, destination, MemorySegment.ofAddress(source), byteSize, "device-to-host copy");
         if (status != 0) throw new GpuMemoryException("device-to-host copy", status);
+    }
+
+    @Override
+    public void copyDeviceToDevice(long destination, long source, long byteSize) {
+        ensureOpen();
+        if (byteSize < 0) throw new IllegalArgumentException("byteSize must not be negative");
+        requireAddresses(destination, source);
+        int status = invokeCopy(
+                copyDeviceToDevice,
+                MemorySegment.ofAddress(destination),
+                MemorySegment.ofAddress(source),
+                byteSize,
+                "device-to-device copy");
+        if (status != 0) throw new GpuMemoryException("device-to-device copy", status);
     }
 
     @Override
@@ -483,6 +508,128 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
         requireDeviceAddress(address);
         if (byteSize <= 0) throw new IllegalArgumentException("byteSize must be positive");
         invokeLayer("CUDA device memory zero", zeroDeviceMemory, MemorySegment.ofAddress(address), byteSize);
+    }
+
+    @Override
+    public void attentionQkNormRopeBf16(
+            long queryKeyAddress,
+            long queryNormAddress,
+            long keyNormAddress,
+            long outputAddress,
+            int rows,
+            int queryHeads,
+            int keyValueHeads,
+            int headDim,
+            int rotaryDim,
+            long startPosition,
+            float epsilon,
+            double ropeTheta) {
+        ensureOpen();
+        requireAddresses(queryKeyAddress, queryNormAddress, keyNormAddress, outputAddress);
+        if (rows <= 0
+                || queryHeads <= 0
+                || keyValueHeads <= 0
+                || queryHeads % keyValueHeads != 0
+                || headDim != 256
+                || rotaryDim <= 0
+                || rotaryDim > headDim
+                || (rotaryDim & 1) != 0
+                || startPosition < 0
+                || !Float.isFinite(epsilon)
+                || epsilon <= 0
+                || !Double.isFinite(ropeTheta)
+                || ropeTheta <= 0) {
+            throw new IllegalArgumentException("attention Q/K normalization and RoPE dimensions are invalid");
+        }
+        invokeLayer(
+                "Qwen attention Q/K normalization and RoPE",
+                attentionQkNormRopeBf16,
+                MemorySegment.ofAddress(queryKeyAddress),
+                MemorySegment.ofAddress(queryNormAddress),
+                MemorySegment.ofAddress(keyNormAddress),
+                MemorySegment.ofAddress(outputAddress),
+                rows,
+                queryHeads,
+                keyValueHeads,
+                headDim,
+                rotaryDim,
+                startPosition,
+                epsilon,
+                ropeTheta);
+    }
+
+    @Override
+    public void attentionKvAppendBf16(
+            long queryKeyAddress,
+            long gateValueAddress,
+            long keyCacheAddress,
+            long valueCacheAddress,
+            int rows,
+            int queryWidth,
+            int keyValueWidth,
+            long startPosition) {
+        ensureOpen();
+        requireAddresses(queryKeyAddress, gateValueAddress, keyCacheAddress, valueCacheAddress);
+        if (rows <= 0
+                || queryWidth <= 0
+                || keyValueWidth <= 0
+                || queryWidth % keyValueWidth != 0
+                || startPosition < 0) {
+            throw new IllegalArgumentException("attention KV append dimensions are invalid");
+        }
+        Math.addExact(startPosition, rows);
+        invokeLayer(
+                "Qwen attention KV append",
+                attentionKvAppendBf16,
+                MemorySegment.ofAddress(queryKeyAddress),
+                MemorySegment.ofAddress(gateValueAddress),
+                MemorySegment.ofAddress(keyCacheAddress),
+                MemorySegment.ofAddress(valueCacheAddress),
+                rows,
+                queryWidth,
+                keyValueWidth,
+                startPosition);
+    }
+
+    @Override
+    public void attentionCausalBf16(
+            long queryKeyAddress,
+            long gateValueAddress,
+            long keyCacheAddress,
+            long valueCacheAddress,
+            long outputAddress,
+            int rows,
+            int queryHeads,
+            int keyValueHeads,
+            int headDim,
+            int cacheLength,
+            long startPosition) {
+        ensureOpen();
+        requireAddresses(queryKeyAddress, gateValueAddress, keyCacheAddress, valueCacheAddress, outputAddress);
+        if (rows <= 0
+                || queryHeads <= 0
+                || keyValueHeads <= 0
+                || queryHeads % keyValueHeads != 0
+                || headDim != 256
+                || cacheLength <= 0
+                || startPosition < 0
+                || Math.addExact(startPosition, rows) > cacheLength) {
+            throw new IllegalArgumentException("causal attention dimensions are invalid");
+        }
+        invokeLayer(
+                "Qwen causal attention",
+                attentionCausalBf16,
+                MemorySegment.ofAddress(queryKeyAddress),
+                MemorySegment.ofAddress(gateValueAddress),
+                MemorySegment.ofAddress(keyCacheAddress),
+                MemorySegment.ofAddress(valueCacheAddress),
+                MemorySegment.ofAddress(outputAddress),
+                rows,
+                queryHeads,
+                keyValueHeads,
+                headDim,
+                cacheLength,
+                startPosition);
     }
 
     @Override

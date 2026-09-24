@@ -113,7 +113,7 @@ final class QwenFirstLayerCpuReference {
         return new Result(buffers, a, b, g, beta);
     }
 
-    private static short[] q3Embedding(byte[] weights, int tokenId, int hidden, int vocabulary) {
+    static short[] q3Embedding(byte[] weights, int tokenId, int hidden, int vocabulary) {
         if (tokenId < 0 || tokenId >= vocabulary) throw new IllegalArgumentException("token ID");
         int groups = ((hidden + 127) / 128) * 2;
         int scaleOffset = align256(vocabulary * groups * 24);
@@ -131,7 +131,7 @@ final class QwenFirstLayerCpuReference {
         return output;
     }
 
-    private static short[] quantizedLinear(short[] input, byte[] weights, int rows, int width, int outputs, int bits) {
+    static short[] quantizedLinear(short[] input, byte[] weights, int rows, int width, int outputs, int bits) {
         int groups = bits == 3 ? ((width + 127) / 128) * 2 : width / 64;
         int codePlane = bits == 3 ? align256(outputs * groups * 24) : align256(outputs * groups * 32);
         int highBytes = bits == 5 ? outputs * groups * 8 : 0;
@@ -172,7 +172,7 @@ final class QwenFirstLayerCpuReference {
         return output;
     }
 
-    private static float[] bf16Linear(short[] input, byte[] weights, int width, int outputs) {
+    static float[] bf16Linear(short[] input, byte[] weights, int width, int outputs) {
         float[] result = new float[outputs];
         for (int out = 0; out < outputs; out++) {
             float sum = 0.0f;
@@ -184,7 +184,7 @@ final class QwenFirstLayerCpuReference {
         return result;
     }
 
-    private static short[] rmsNormUnitOffset(short[] input, byte[] weights, int rows, int width, float epsilon) {
+    static short[] rmsNormUnitOffset(short[] input, byte[] weights, int rows, int width, float epsilon) {
         short[] output = new short[input.length];
         for (int row = 0; row < rows; row++) {
             float sum = 0.0f;
@@ -201,7 +201,7 @@ final class QwenFirstLayerCpuReference {
         return output;
     }
 
-    private static short[] convolution(
+    static short[] convolution(
             short[] queryKey,
             short[] valueZ,
             byte[] weights,
@@ -224,7 +224,7 @@ final class QwenFirstLayerCpuReference {
         return output;
     }
 
-    private static Recurrence recurrence(
+    static Recurrence recurrence(
             short[] convolved,
             float[] g,
             float[] beta,
@@ -263,7 +263,7 @@ final class QwenFirstLayerCpuReference {
         return new Recurrence(output, state);
     }
 
-    private static short[] gatedRmsNorm(
+    static short[] gatedRmsNorm(
             short[] recurrent, short[] valueZ, byte[] weights, int heads, int headDim, float epsilon) {
         short[] output = new short[recurrent.length];
         int width = heads * headDim;
@@ -285,7 +285,7 @@ final class QwenFirstLayerCpuReference {
         return output;
     }
 
-    private static short[] residualAdd(short[] left, short[] right) {
+    static short[] residualAdd(short[] left, short[] right) {
         short[] output = new short[left.length];
         for (int i = 0; i < output.length; i++) {
             output[i] = floatToBf16(bf16ToFloat(left[i]) + bf16ToFloat(right[i]));
@@ -293,7 +293,7 @@ final class QwenFirstLayerCpuReference {
         return output;
     }
 
-    private static short[] swiGlu(short[] gateUp, int intermediate) {
+    static short[] swiGlu(short[] gateUp, int intermediate) {
         short[] output = new short[intermediate];
         for (int i = 0; i < intermediate; i++) {
             output[i] = floatToBf16(silu(bf16ToFloat(gateUp[i])) * bf16ToFloat(gateUp[intermediate + i]));
@@ -313,7 +313,7 @@ final class QwenFirstLayerCpuReference {
         return output;
     }
 
-    private static byte[] read(ExecutionGpu gpu, TensorHandle handle) {
+    static byte[] read(ExecutionGpu gpu, TensorHandle handle) {
         if (handle.byteSize() > Integer.MAX_VALUE) throw new IllegalArgumentException("reference tensor too large");
         byte[] bytes = new byte[(int) handle.byteSize()];
         try (Arena arena = Arena.ofConfined()) {
@@ -324,7 +324,7 @@ final class QwenFirstLayerCpuReference {
         return bytes;
     }
 
-    private static float[] readFp32(ExecutionGpu gpu, TensorHandle handle) {
+    static float[] readFp32(ExecutionGpu gpu, TensorHandle handle) {
         byte[] bytes = read(gpu, handle);
         ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
         float[] values = new float[bytes.length / Float.BYTES];
@@ -346,11 +346,11 @@ final class QwenFirstLayerCpuReference {
         return value / (1.0f + (float) Math.exp(-value));
     }
 
-    private static float sigmoid(float value) {
+    static float sigmoid(float value) {
         return (float) (1.0 / (1.0 + Math.exp(-value)));
     }
 
-    private static float softplus(float value) {
+    static float softplus(float value) {
         return (float) (Math.max(value, 0.0) + Math.log1p(Math.exp(-Math.abs(value))));
     }
 
@@ -358,5 +358,5 @@ final class QwenFirstLayerCpuReference {
         return (value + 255) & ~255;
     }
 
-    private record Recurrence(short[] output, float[] state) {}
+    record Recurrence(short[] output, float[] state) {}
 }

@@ -3,6 +3,7 @@ package io.euhedral_execution.inference.core.scheduling;
 import io.euhedral_execution.inference.core.gpu.ExecutionGpu;
 import io.euhedral_execution.inference.core.model_loader.config.QwenConfig;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -41,6 +42,7 @@ public final class QwenExecutionContext {
     private final AtomicIntegerArray remainingDependencies;
     private QwenSequenceState.ExecutionLease lease;
     private QwenExecutionWorkspace workspace;
+    private QwenDeviceLogits logitsOutput;
     private long temporaryTokenIdsAddress;
 
     public QwenExecutionContext(
@@ -77,6 +79,10 @@ public final class QwenExecutionContext {
         return this.tokenIds.length;
     }
 
+    public long startPosition() {
+        return this.startPosition;
+    }
+
     public int[] inputTokenIds() {
         return this.tokenIds.clone();
     }
@@ -91,6 +97,11 @@ public final class QwenExecutionContext {
 
     public CompletableFuture<Outcome> outcome() {
         return this.outcome.copy();
+    }
+
+    /// Returns GPU-resident logits after successful completion; the caller owns and must close them.
+    public Optional<QwenDeviceLogits> logitsOutput() {
+        return Optional.ofNullable(this.logitsOutput);
     }
 
     CompletableFuture<Outcome> completion() {
@@ -207,27 +218,57 @@ public final class QwenExecutionContext {
     private void initializeSequenceState(ExecutionGpu gpu) {
         if (!this.plan.hasFirstLayer()) return;
         Object current = this.sequence.recurrentState();
+        Object currentKv = this.sequence.kvCacheState();
+        QwenConfig config = this.plan.weights().config();
         if (current == null) {
-            QwenConfig config = this.plan.weights().config();
-            QwenGdnSequenceState created = QwenGdnSequenceState.allocate(
-                    gpu,
-                    config.linearNumKeyHeads(),
-                    config.linearNumValueHeads(),
-                    config.linearKeyHeadDim(),
-                    config.linearValueHeadDim(),
-                    config.linearConvKernelDim());
+            AutoCloseable createdRecurrent = null;
+            AutoCloseable createdKv = null;
             try {
-                this.sequence.setRecurrentState(this.lease, created);
-            } catch (RuntimeException | Error attachmentFailure) {
-                try {
-                    created.close();
-                } catch (Throwable cleanupFailure) {
-                    attachmentFailure.addSuppressed(cleanupFailure);
+                if (this.plan.weights().layers().length > 1) {
+                    createdRecurrent = GdnSequenceStates.allocate(
+                            gpu,
+                            config.layerTypes(),
+                            config.linearNumKeyHeads(),
+                            config.linearNumValueHeads(),
+                            config.linearKeyHeadDim(),
+                            config.linearValueHeadDim(),
+                            config.linearConvKernelDim());
+                    createdKv = AttentionSequenceStates.allocate(
+                            gpu, config.layerTypes(), config.numKeyValueHeads() * config.attentionHeadDim());
+                } else {
+                    createdRecurrent = QwenGdnSequenceState.allocate(
+                            gpu,
+                            config.linearNumKeyHeads(),
+                            config.linearNumValueHeads(),
+                            config.linearKeyHeadDim(),
+                            config.linearValueHeadDim(),
+                            config.linearConvKernelDim());
                 }
+                this.sequence.setRecurrentState(this.lease, createdRecurrent);
+                if (createdKv != null) this.sequence.setKvCacheState(this.lease, createdKv);
+            } catch (RuntimeException | Error attachmentFailure) {
+                closeCreatedState(createdKv, attachmentFailure);
+                closeCreatedState(createdRecurrent, attachmentFailure);
                 throw attachmentFailure;
+            }
+        } else if (this.plan.weights().layers().length > 1) {
+            if (!(current instanceof GdnSequenceStates)) {
+                throw new IllegalStateException("sequence already owns incompatible full-model GDN state");
+            }
+            if (!(currentKv instanceof AttentionSequenceStates)) {
+                throw new IllegalStateException("sequence already owns incompatible full-attention KV state");
             }
         } else if (!(current instanceof QwenGdnSequenceState)) {
             throw new IllegalStateException("sequence already owns incompatible recurrent state");
+        }
+    }
+
+    private static void closeCreatedState(AutoCloseable state, Throwable failure) {
+        if (state == null) return;
+        try {
+            state.close();
+        } catch (Exception cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
         }
     }
 
@@ -240,6 +281,13 @@ public final class QwenExecutionContext {
             releaseTemporaryTokenIds(gpu);
         } catch (Throwable cleanupFailure) {
             fail(cleanupFailure);
+        }
+        if (this.failure.get() == null && !this.sequence.cancellationRequested()) {
+            try {
+                retainLogits(gpu);
+            } catch (Throwable retentionFailure) {
+                fail(retentionFailure);
+            }
         }
         if (this.failure.get() == null && !this.sequence.cancellationRequested() && terminalConsumer != null) {
             try {
@@ -264,6 +312,10 @@ public final class QwenExecutionContext {
         if (error == null && !this.failure.compareAndSet(null, TERMINAL_SUCCESS)) {
             error = this.failure.get();
         }
+        if (error == TERMINAL_SUCCESS) error = null;
+        if (error != null || this.sequence.cancellationRequested()) {
+            error = releaseLogits(error);
+        }
         Outcome completed;
         if (error != null) {
             if (this.lease != null) {
@@ -282,5 +334,36 @@ public final class QwenExecutionContext {
         }
         this.lease = null;
         this.outcome.complete(completed);
+    }
+
+    private void retainLogits(ExecutionGpu gpu) {
+        if (this.workspace == null || !this.workspace.hasBuffer(QwenExecutionPlan.Buffer.LOGITS)) return;
+        long address = this.workspace.detachAddress(QwenExecutionPlan.Buffer.LOGITS);
+        try {
+            this.logitsOutput = new QwenDeviceLogits(
+                    gpu,
+                    address,
+                    this.tokenIds.length,
+                    this.plan.weights().config().vocabSize());
+        } catch (RuntimeException | Error constructionFailure) {
+            try {
+                gpu.free(address);
+            } catch (Throwable cleanupFailure) {
+                constructionFailure.addSuppressed(cleanupFailure);
+            }
+            throw constructionFailure;
+        }
+    }
+
+    private Throwable releaseLogits(Throwable priorFailure) {
+        if (this.logitsOutput == null) return priorFailure;
+        try {
+            this.logitsOutput.close();
+            this.logitsOutput = null;
+        } catch (Throwable cleanupFailure) {
+            if (priorFailure != null) priorFailure.addSuppressed(cleanupFailure);
+            else priorFailure = cleanupFailure;
+        }
+        return priorFailure;
     }
 }
