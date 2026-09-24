@@ -5,10 +5,10 @@ import io.euhedral_execution.inference.core.gpu.ExecutionGpu;
 import io.euhedral_execution.inference.core.model_loader.config.QwenConfig;
 import io.euhedral_execution.inference.core.scheduling.AttentionKvState;
 import io.euhedral_execution.inference.core.scheduling.AttentionSequenceStates;
+import io.euhedral_execution.inference.core.scheduling.GdnSequenceStates;
 import io.euhedral_execution.inference.core.scheduling.QwenExecutionContext;
 import io.euhedral_execution.inference.core.scheduling.QwenExecutionPlan;
 import io.euhedral_execution.inference.core.scheduling.QwenGdnSequenceState;
-import io.euhedral_execution.inference.core.scheduling.GdnSequenceStates;
 import io.euhedral_execution.inference.core.scheduling.QwenWorkGenerator;
 
 /// Executes one stateful or elementwise GPU instruction using its immutable buffer operands.

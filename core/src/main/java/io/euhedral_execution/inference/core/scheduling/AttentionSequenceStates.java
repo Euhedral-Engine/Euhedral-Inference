@@ -14,8 +14,7 @@ public final class AttentionSequenceStates implements AutoCloseable {
         this.states = states;
     }
 
-    public static AttentionSequenceStates allocate(
-            ExecutionGpu gpu, QwenLayerType[] layerTypes, int keyValueWidth) {
+    public static AttentionSequenceStates allocate(ExecutionGpu gpu, QwenLayerType[] layerTypes, int keyValueWidth) {
         Objects.requireNonNull(gpu, "gpu");
         Objects.requireNonNull(layerTypes, "layerTypes");
         AttentionKvState[] states = new AttentionKvState[layerTypes.length];

@@ -5,7 +5,11 @@ import io.euhedral_execution.inference.core.model_loader.QwenWeights;
 import io.euhedral_execution.inference.core.model_loader.artifact.CompactTensorLayout;
 import io.euhedral_execution.inference.core.model_loader.config.QwenConfig;
 import io.euhedral_execution.inference.core.model_loader.config.QwenLayerType;
+import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenCompactAttentionWeights;
+import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenCompactDenseFfnWeights;
+import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenCompactGatedDeltaNetWeights;
 import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenLayerWeights;
+import io.euhedral_execution.inference.core.model_loader.layer_weights.QwenMixerWeights;
 import io.euhedral_execution.inference.core.model_loader.layer_weights.TensorDataType;
 import io.euhedral_execution.inference.core.model_loader.layer_weights.TensorHandle;
 import io.euhedral_execution.inference.core.model_loader.layer_weights.WeightFormat;
@@ -19,6 +23,7 @@ final class QwenExecutionFixtures {
     static final int WIDTH = 64;
     static final int VOCABULARY = 8;
     static final long MODEL_ADDRESS = 77;
+    private static final AtomicLong NEXT_COMPACT_ADDRESS = new AtomicLong(20_000);
 
     static QwenWeights weights() {
         QwenConfig config = new QwenConfig(
@@ -74,6 +79,112 @@ final class QwenExecutionFixtures {
                 WeightLayout.ROW_SPLIT_K128_V1,
                 address,
                 bytes);
+    }
+
+    static QwenWeights statefulCompactWeights() {
+        int hidden = 128;
+        int intermediate = 128;
+        QwenLayerType[] types = {QwenLayerType.GATED_DELTA_NET, QwenLayerType.FULL_ATTENTION};
+        QwenConfig config = new QwenConfig(
+                VOCABULARY,
+                hidden,
+                types.length,
+                1,
+                1,
+                128,
+                intermediate,
+                1,
+                1,
+                128,
+                128,
+                2,
+                1.0e-6,
+                1_000_000.0,
+                1.0,
+                128,
+                "silu",
+                types,
+                0,
+                0,
+                0,
+                0,
+                false,
+                true,
+                0);
+        QwenLayerWeights[] layers = new QwenLayerWeights[types.length];
+        layers[0] = layer(0, hidden, intermediate, gdnWeights(hidden));
+        layers[1] = layer(1, hidden, intermediate, attentionWeights(hidden));
+        return new QwenWeights(
+                config,
+                quantized("text/token_embedding", VOCABULARY, hidden, WeightFormat.Q3_G64_FP16),
+                layers,
+                direct("text/final_norm", WeightFormat.BF16, hidden),
+                quantized("text/output_head", VOCABULARY, hidden, WeightFormat.Q3_G64_FP16),
+                null);
+    }
+
+    private static QwenLayerWeights layer(int index, int hidden, int intermediate, QwenMixerWeights mixer) {
+        return new QwenLayerWeights(
+                index,
+                direct("layer-" + index + "/input_norm", WeightFormat.BF16, hidden),
+                direct("layer-" + index + "/post_norm", WeightFormat.BF16, hidden),
+                mixer,
+                new QwenCompactDenseFfnWeights(
+                        quantized("layer-" + index + "/gate_up", 2 * intermediate, hidden, WeightFormat.Q3_G64_FP16),
+                        quantized("layer-" + index + "/down", hidden, intermediate, WeightFormat.Q3_G64_FP16)));
+    }
+
+    private static QwenCompactGatedDeltaNetWeights gdnWeights(int hidden) {
+        return new QwenCompactGatedDeltaNetWeights(
+                direct("gdn/a_log", WeightFormat.FP32, 1),
+                direct("gdn/dt_bias", WeightFormat.FP32, 1),
+                direct("gdn/convolution", WeightFormat.BF16, 2, 384),
+                direct("gdn/a_projection", WeightFormat.BF16, 1, hidden),
+                direct("gdn/b_projection", WeightFormat.BF16, 1, hidden),
+                quantized("gdn/query_key", 256, hidden, WeightFormat.Q4_G64_FP16),
+                quantized("gdn/value_z", 256, hidden, WeightFormat.Q5_G64_FP16),
+                direct("gdn/norm", WeightFormat.BF16, 128),
+                quantized("gdn/output", hidden, 128, WeightFormat.Q3_G64_FP16));
+    }
+
+    private static QwenCompactAttentionWeights attentionWeights(int hidden) {
+        return new QwenCompactAttentionWeights(
+                quantized("attention/query_key", 256, hidden, WeightFormat.Q4_G64_FP16),
+                quantized("attention/gate_value", 256, hidden, WeightFormat.Q5_G64_FP16),
+                direct("attention/query_norm", WeightFormat.BF16, 128),
+                direct("attention/key_norm", WeightFormat.BF16, 128),
+                quantized("attention/output", hidden, 128, WeightFormat.Q3_G64_FP16));
+    }
+
+    private static TensorHandle direct(String name, WeightFormat format, int... dimensions) {
+        long elements = 1;
+        long[] shape = new long[dimensions.length];
+        for (int index = 0; index < dimensions.length; index++) {
+            shape[index] = dimensions[index];
+            elements = Math.multiplyExact(elements, dimensions[index]);
+        }
+        int elementBytes = format == WeightFormat.FP32 ? Float.BYTES : Short.BYTES;
+        return new TensorHandle(
+                name,
+                shape,
+                TensorDataType.BF16,
+                format,
+                WeightLayout.CONTIGUOUS_LE_V1,
+                NEXT_COMPACT_ADDRESS.getAndIncrement(),
+                Math.multiplyExact(elements, elementBytes));
+    }
+
+    private static TensorHandle quantized(String name, int rows, int columns, WeightFormat format) {
+        long[] shape = {rows, columns};
+        return new TensorHandle(
+                name,
+                shape,
+                TensorDataType.BF16,
+                format,
+                WeightLayout.ROW_SPLIT_K128_V1,
+                NEXT_COMPACT_ADDRESS.getAndIncrement(),
+                CompactTensorLayout.expectedByteSize(
+                        shape, TensorDataType.BF16, format, WeightLayout.ROW_SPLIT_K128_V1));
     }
 
     static final class RecordingGpu extends ExecutionGpu {

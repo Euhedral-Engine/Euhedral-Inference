@@ -28,6 +28,7 @@ public final class QwenExecutionRunner implements LatticeSource {
 
     private final AtomicReference<LatticeReceiver> downstream = new AtomicReference<>();
     private final AtomicBoolean finished = new AtomicBoolean();
+    private final CompletableFuture<Void> termination = new CompletableFuture<>();
 
     public QwenExecutionRunner(QwenExecutionPlan plan, ExecutionGpu gpu) {
         this(plan, gpu, ignored -> {});
@@ -86,10 +87,10 @@ public final class QwenExecutionRunner implements LatticeSource {
         if (!attached.compareAndSet(false, true)) {
             receiver.onError(new IllegalStateException("Qwen source already has a downstream"));
         } else if (finished.get()) {
-            receiver.onComplete();
+            notifyComplete(receiver);
         } else {
             downstream.set(receiver);
-            if (finished.get() && downstream.compareAndSet(receiver, null)) receiver.onComplete();
+            if (finished.get() && downstream.compareAndSet(receiver, null)) notifyComplete(receiver);
         }
     }
 
@@ -121,12 +122,32 @@ public final class QwenExecutionRunner implements LatticeSource {
     private void signalComplete() {
         if (finished.compareAndSet(false, true)) {
             LatticeReceiver receiver = downstream.getAndSet(null);
-            if (receiver != null) receiver.onComplete();
+            notifyComplete(receiver);
         }
+    }
+
+    private void notifyComplete(LatticeReceiver receiver) {
+        try {
+            if (receiver != null) receiver.onComplete();
+        } catch (RuntimeException | Error failure) {
+            this.termination.completeExceptionally(failure);
+            throw failure;
+        }
+        this.termination.complete(null);
+    }
+
+    /// Waits until the downstream completion callback has returned to its source owner.
+    void awaitTermination() {
+        this.termination.join();
     }
 
     @Override
     public boolean isComplete() {
         return finished.get();
+    }
+
+    /// Whether this source currently retains its lattice receiver.
+    public boolean isAttached() {
+        return this.downstream.get() != null;
     }
 }
