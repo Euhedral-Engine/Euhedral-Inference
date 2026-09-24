@@ -82,11 +82,15 @@ final class QwenExecutionFixtures {
     }
 
     static QwenWeights statefulCompactWeights() {
+        return statefulCompactWeights(VOCABULARY);
+    }
+
+    static QwenWeights statefulCompactWeights(int vocabularySize) {
         int hidden = 128;
         int intermediate = 128;
         QwenLayerType[] types = {QwenLayerType.GATED_DELTA_NET, QwenLayerType.FULL_ATTENTION};
         QwenConfig config = new QwenConfig(
-                VOCABULARY,
+                vocabularySize,
                 hidden,
                 types.length,
                 1,
@@ -116,10 +120,10 @@ final class QwenExecutionFixtures {
         layers[1] = layer(1, hidden, intermediate, attentionWeights(hidden));
         return new QwenWeights(
                 config,
-                quantized("text/token_embedding", VOCABULARY, hidden, WeightFormat.Q3_G64_FP16),
+                quantized("text/token_embedding", vocabularySize, hidden, WeightFormat.Q3_G64_FP16),
                 layers,
                 direct("text/final_norm", WeightFormat.BF16, hidden),
-                quantized("text/output_head", VOCABULARY, hidden, WeightFormat.Q3_G64_FP16),
+                quantized("text/output_head", vocabularySize, hidden, WeightFormat.Q3_G64_FP16),
                 null);
     }
 
@@ -187,7 +191,7 @@ final class QwenExecutionFixtures {
                         shape, TensorDataType.BF16, format, WeightLayout.ROW_SPLIT_K128_V1));
     }
 
-    static final class RecordingGpu extends ExecutionGpu {
+    static class RecordingGpu extends ExecutionGpu {
         final AtomicLong nextAddress = new AtomicLong(1000);
         final List<Long> allocations = new ArrayList<>();
         final List<Long> frees = new ArrayList<>();

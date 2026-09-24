@@ -56,6 +56,7 @@ subprojects {
             exclude("**/QwenFirstLayerCudaIntegrationTest.class")
             exclude("**/QwenAttentionCudaIntegrationTest.class")
             exclude("**/QwenFullModelCudaIntegrationTest.class")
+            exclude("**/QwenGenerationSessionCudaIntegrationTest.class")
             useJUnitPlatform()
         }
         val testSourceSet = the<SourceSetContainer>()["test"]
@@ -75,6 +76,7 @@ subprojects {
             include("**/QwenFirstLayerCudaIntegrationTest.class")
             include("**/QwenAttentionCudaIntegrationTest.class")
             include("**/QwenFullModelCudaIntegrationTest.class")
+            include("**/QwenGenerationSessionCudaIntegrationTest.class")
             systemProperty(
                     "euhedral.cuda.library",
                     nativeBuildDirectory.get().dir("lib").file(nativeLibraryFileName).asFile.absolutePath)
