@@ -163,9 +163,14 @@ public final class InferenceEngine implements AutoCloseable {
                 this.runtime,
                 this.gpu,
                 SEQUENCE_IDS.getAndIncrement(),
-                Objects.requireNonNull(config, "config"));
+                Objects.requireNonNull(config, "config"),
+                this::releaseSession);
         this.sessions.add(session);
         return session;
+    }
+
+    private synchronized void releaseSession(QwenGenerationSession session) {
+        this.sessions.remove(session);
     }
 
     public QwenTokenizer tokenizer() {

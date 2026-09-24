@@ -22,6 +22,65 @@ class InferenceEngineTest {
     @TempDir
     Path directory;
 
+    private static int trackedSessions(InferenceEngine engine) {
+        try {
+            var field = InferenceEngine.class.getDeclaredField("sessions");
+            field.setAccessible(true);
+            synchronized (engine) {
+                return ((java.util.Collection<?>) field.get(engine)).size();
+            }
+        } catch (ReflectiveOperationException failure) {
+            throw new AssertionError(failure);
+        }
+    }
+
+    @Test
+    void completedSessionClosesRemoveTrackingWithoutWaitingForAnotherRequest() throws Exception {
+        try (var engine = InferenceEngine.load(config(), new FakeBootstrap())) {
+            var live = engine.createSession(GenerationConfig.greedy(1L));
+            for (int index = 0; index < 20; index++) {
+                var session = engine.createSession(GenerationConfig.greedy(1L));
+                session.generate("!", 1, ignored -> {});
+                session.close();
+                session.close();
+                assertEquals(1, trackedSessions(engine));
+                assertEquals(java.util.List.of(1), session.generatedTokenIds());
+            }
+            live.generate("!", 1, ignored -> {});
+        }
+    }
+
+    @Test
+    void callbackCloseRemainsTrackedUntilGenerationUnwinds() throws Exception {
+        try (var engine = InferenceEngine.load(config(), new FakeBootstrap())) {
+            var session = engine.createSession(GenerationConfig.greedy(1L));
+            session.generate("!", 1, text -> {
+                session.close();
+                assertEquals(1, trackedSessions(engine));
+                assertThrows(IllegalStateException.class, engine::close);
+            });
+            assertEquals(0, trackedSessions(engine));
+        }
+    }
+
+    @Test
+    void failedSessionCloseStaysTrackedUntilSuccessfulRetry() throws Exception {
+        var boot = new FakeBootstrap();
+        try (var engine = InferenceEngine.load(config(), boot)) {
+            var session = engine.createSession(GenerationConfig.greedy(1L));
+            session.generate("!", 1, ignored -> {});
+            boot.gpu.freeFailures.set(100);
+            try {
+                assertThrows(IllegalStateException.class, session::close);
+                assertEquals(1, trackedSessions(engine));
+            } finally {
+                boot.gpu.freeFailures.set(0);
+            }
+            session.close();
+            assertEquals(0, trackedSessions(engine));
+        }
+    }
+
     @Test
     void ownsSessionsAndClosesModelAfterThem() throws Exception {
         var bootstrap = new FakeBootstrap();
@@ -170,6 +229,7 @@ class InferenceEngineTest {
             try {
                 assertTrue(engine.isClosed());
                 assertFalse(bootstrap.gpuClosed);
+                assertEquals(1, trackedSessions(engine), "in-flight session retired before execution stopped");
                 assertThrows(IllegalStateException.class, () -> engine.createSession(GenerationConfig.greedy(2L)));
                 var query = executor.submit(() -> assertThrows(IllegalStateException.class, engine::deviceMemoryInfo));
                 query.get(1, java.util.concurrent.TimeUnit.SECONDS);
@@ -178,6 +238,7 @@ class InferenceEngineTest {
             }
             generation.get(10, java.util.concurrent.TimeUnit.SECONDS);
             close.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            assertEquals(0, trackedSessions(engine));
             assertTrue(session.isClosed());
             assertTrue(bootstrap.gpuClosed);
             assertTrue(bootstrap.gpu.freed().containsAll(bootstrap.gpu.allocated()));

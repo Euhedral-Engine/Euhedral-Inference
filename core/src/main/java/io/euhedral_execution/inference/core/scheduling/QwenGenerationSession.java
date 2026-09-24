@@ -30,6 +30,7 @@ public final class QwenGenerationSession implements AutoCloseable {
     private final AtomicBoolean cancelled = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final ReentrantLock generationLock = new ReentrantLock();
+    private Consumer<? super QwenGenerationSession> closeListener;
 
     private IncrementalDecoder decoder;
     private boolean decoderFinished;
@@ -44,6 +45,21 @@ public final class QwenGenerationSession implements AutoCloseable {
             ExecutionGpu gpu,
             long sequenceId,
             GenerationConfig config) {
+        this(tokenizer, plan, runtime, gpu, sequenceId, config, ignored -> {});
+    }
+
+    /// Creates an owner-tracked session. The listener runs after successful cleanup with generation
+    /// stopped, under the session lifecycle lock; it must not block or invoke session operations.
+    /// Failed cleanup retains the listener for retry. Successful notification releases its reference.
+    public QwenGenerationSession(
+            QwenTokenizer tokenizer,
+            QwenExecutionPlan plan,
+            EuhedralInferenceRuntime runtime,
+            ExecutionGpu gpu,
+            long sequenceId,
+            GenerationConfig config,
+            Consumer<? super QwenGenerationSession> closeListener) {
+        this.closeListener = Objects.requireNonNull(closeListener, "closeListener");
         this.tokenizer = Objects.requireNonNull(tokenizer, "tokenizer");
         this.plan = Objects.requireNonNull(plan, "plan");
         this.runtime = Objects.requireNonNull(runtime, "runtime");
@@ -98,8 +114,11 @@ public final class QwenGenerationSession implements AutoCloseable {
             }
         } finally {
             this.generationActive.set(false);
-            this.generationLock.unlock();
-            if (this.closed.get()) this.sequence.complete();
+            try {
+                if (this.closed.get()) completeClose();
+            } finally {
+                this.generationLock.unlock();
+            }
         }
     }
 
@@ -150,9 +169,17 @@ public final class QwenGenerationSession implements AutoCloseable {
         if (this.generationActive.get() && this.generationLock.isHeldByCurrentThread()) return;
         this.generationLock.lock();
         try {
-            this.sequence.complete();
+            completeClose();
         } finally {
             this.generationLock.unlock();
+        }
+    }
+
+    private void completeClose() {
+        this.sequence.complete();
+        if (this.closeListener != null) {
+            this.closeListener.accept(this);
+            this.closeListener = null;
         }
     }
 
