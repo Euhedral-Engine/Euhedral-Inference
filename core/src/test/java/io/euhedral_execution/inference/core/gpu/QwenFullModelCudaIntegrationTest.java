@@ -17,11 +17,13 @@ import io.euhedral_execution.inference.core.model_loader.QwenWeights;
 import io.euhedral_execution.inference.core.model_loader.artifact.QwenArtifact;
 import io.euhedral_execution.inference.core.model_loader.artifact.QwenArtifactReader;
 import io.euhedral_execution.inference.core.model_loader.config.QwenLayerType;
+import io.euhedral_execution.inference.core.sampling.GenerationConfig;
 import io.euhedral_execution.inference.core.scheduling.AttentionSequenceStates;
 import io.euhedral_execution.inference.core.scheduling.GdnSequenceStates;
 import io.euhedral_execution.inference.core.scheduling.QwenExecutionContext;
 import io.euhedral_execution.inference.core.scheduling.QwenExecutionPlan;
 import io.euhedral_execution.inference.core.scheduling.QwenExecutionRunner;
+import io.euhedral_execution.inference.core.scheduling.QwenLogitsSampler;
 import io.euhedral_execution.inference.core.scheduling.QwenSequenceState;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -237,6 +239,14 @@ class QwenFullModelCudaIntegrationTest {
                             Float.isFinite(bf16ToFloat(value)),
                             "final vocabulary projection produced a non-finite logit");
                 }
+                assertEquals(weights.config().vocabSize(), cleanSequence.logits().length);
+                int expectedGreedyToken = independentArgmax(cleanSequence.logits());
+                QwenLogitsSampler greedySampler = new QwenLogitsSampler(
+                        GenerationConfig.greedy(0L), weights.config().vocabSize());
+                assertEquals(
+                        expectedGreedyToken,
+                        greedySampler.selectToken(
+                                cleanSequence.context().logitsOutput().orElseThrow(), gpu));
 
                 RunResult isolatedSequence = execute(
                         gpu,
@@ -311,6 +321,77 @@ class QwenFullModelCudaIntegrationTest {
         }
     }
 
+    @Test
+    @Timeout(value = 600, unit = TimeUnit.SECONDS)
+    void fullQwenGpuGreedySelectionMatchesIndependentArgmaxOfDownloadedLogits() throws Exception {
+        Path artifactPath = Path.of(System.getProperty("euhedral.qwen.artifact"));
+        Path libraryPath = Path.of(System.getProperty("euhedral.cuda.library"));
+        assertTrue(Files.isRegularFile(artifactPath), "compact Qwen artifact is missing: " + artifactPath);
+        QwenArtifact artifact = QwenArtifactReader.read(artifactPath);
+
+        try (CudaGpuMemory gpu = new CudaGpuMemory(libraryPath)) {
+            QwenWeights weights = QwenWeightLoader.load(artifactPath, artifact, gpu);
+            List<Long> modelAddresses = weights.runtimeObjects().values().stream()
+                    .map(handle -> handle.deviceAddress())
+                    .distinct()
+                    .toList();
+            QwenSequenceState sequence = new QwenSequenceState(601);
+            RunResult run = null;
+            Throwable failure = null;
+            try {
+                run = execute(
+                        gpu,
+                        new QwenExecutionPlan(weights),
+                        sequence,
+                        QwenExecutionContext.ExecutionKind.DECODE,
+                        0,
+                        new int[] {INITIAL_TOKEN},
+                        List.of());
+                assertSuccessful(run);
+                assertEquals(weights.config().vocabSize(), run.logits().length);
+                int expectedToken = independentArgmax(run.logits());
+                QwenLogitsSampler greedySampler = new QwenLogitsSampler(
+                        GenerationConfig.greedy(0L), weights.config().vocabSize());
+
+                assertEquals(
+                        expectedToken,
+                        greedySampler.selectToken(run.context().logitsOutput().orElseThrow(), gpu));
+                int[] topTwoTokens = independentTopTwo(run.logits());
+                QwenLogitsSampler stochasticSampler = new QwenLogitsSampler(
+                        new GenerationConfig(1.0f, 2, 1.0f, 17L, false),
+                        weights.config().vocabSize());
+                int stochasticToken = stochasticSampler.selectToken(
+                        run.context().logitsOutput().orElseThrow(), gpu);
+                assertTrue(stochasticToken == topTwoTokens[0] || stochasticToken == topTwoTokens[1]);
+            } catch (Throwable testFailure) {
+                failure = testFailure;
+            } finally {
+                try {
+                    sequence.complete();
+                } catch (Throwable cleanupFailure) {
+                    failure = mergeFailure(failure, cleanupFailure);
+                }
+                if (run != null) {
+                    try {
+                        run.closeLogits();
+                    } catch (Throwable cleanupFailure) {
+                        failure = mergeFailure(failure, cleanupFailure);
+                    }
+                }
+                for (int index = modelAddresses.size() - 1; index >= 0; index--) {
+                    try {
+                        gpu.free(modelAddresses.get(index));
+                    } catch (Throwable cleanupFailure) {
+                        failure = mergeFailure(failure, cleanupFailure);
+                    }
+                }
+            }
+            if (failure instanceof Exception exception) throw exception;
+            if (failure instanceof Error error) throw error;
+            if (failure != null) throw new IllegalStateException(failure);
+        }
+    }
+
     private static RunResult execute(
             CudaGpuMemory gpu,
             QwenExecutionPlan plan,
@@ -362,6 +443,43 @@ class QwenFullModelCudaIntegrationTest {
     private static void assertSuccessful(RunResult run) {
         assertNotNull(run.context());
         assertTrue(run.context().workspace().isClosed());
+    }
+
+    private static int independentArgmax(short[] downloadedLogits) {
+        int bestTokenId = 0;
+        float bestLogit = bf16ToFloat(downloadedLogits[0]);
+        for (int tokenId = 1; tokenId < downloadedLogits.length; tokenId++) {
+            float logit = bf16ToFloat(downloadedLogits[tokenId]);
+            if (logit > bestLogit) {
+                bestTokenId = tokenId;
+                bestLogit = logit;
+            }
+        }
+        return bestTokenId;
+    }
+
+    private static int[] independentTopTwo(short[] downloadedLogits) {
+        int[] tokenIds = {-1, -1};
+        float[] logits = {Float.NEGATIVE_INFINITY, Float.NEGATIVE_INFINITY};
+        for (int tokenId = 0; tokenId < downloadedLogits.length; tokenId++) {
+            float logit = bf16ToFloat(downloadedLogits[tokenId]);
+            if (logit > logits[0]) {
+                tokenIds[1] = tokenIds[0];
+                logits[1] = logits[0];
+                tokenIds[0] = tokenId;
+                logits[0] = logit;
+            } else if (logit > logits[1]) {
+                tokenIds[1] = tokenId;
+                logits[1] = logit;
+            }
+        }
+        return tokenIds;
+    }
+
+    private static Throwable mergeFailure(Throwable failure, Throwable nextFailure) {
+        if (failure == null) return nextFailure;
+        failure.addSuppressed(nextFailure);
+        return failure;
     }
 
     private static byte[] readDeviceBytes(CudaGpuMemory gpu, long address, long byteSize) {

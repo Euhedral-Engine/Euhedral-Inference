@@ -48,6 +48,21 @@ public final class QwenDeviceLogits implements AutoCloseable {
         this.gpu.copyDeviceToHost(destination, this.deviceAddress, byteSize());
     }
 
+    /// Copies the final vocabulary row; ownership of the retained device allocation stays here.
+    public void copyFinalTokenRowToHost(ExecutionGpu gpu, MemorySegment destination) {
+        Objects.requireNonNull(gpu, "gpu");
+        Objects.requireNonNull(destination, "destination");
+        ensureOpen();
+        if (gpu != this.gpu) throw new IllegalArgumentException("logits belong to a different GPU");
+
+        long rowByteSize = Math.multiplyExact((long) this.vocabularySize, Short.BYTES);
+        if (destination.byteSize() < rowByteSize)
+            throw new IllegalArgumentException("destination is too small for the final logits row");
+        long rowOffset = Math.multiplyExact((long) (this.tokenCount - 1), rowByteSize);
+        long rowAddress = Math.addExact(this.deviceAddress, rowOffset);
+        this.gpu.copyDeviceToHost(destination.asSlice(0, rowByteSize), rowAddress, rowByteSize);
+    }
+
     @Override
     public void close() {
         if (this.deviceAddress == 0) return;
