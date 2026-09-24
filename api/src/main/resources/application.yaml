@@ -1,0 +1,28 @@
+# OpenAI-compatible clients use http://<server.address>:<server.port>/v1 as their base URL.
+server:
+  port: ${PORT:1738}
+  # Let in-flight completions finish before generation threads and the engine are stopped.
+  shutdown: graceful
+
+spring:
+  application:
+    name: euhedral-inference-api
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+  main:
+    banner-mode: off
+
+euhedral:
+  # Required; each may also be set through EUHEDRAL_INFERENCE_* environment variables.
+  inference:
+    # artifact-path: /path/to/model.edrl
+    # tokenizer-directory: /path/to/checkpoint   (tokenizer.json, chat_template.jinja, generation_config.json)
+    # cuda-library-path: /path/to/libeuhedral_cuda.so
+    # worker-cpus: 2,3            (processor IDs or inclusive ranges, e.g. 2-5,8)
+    # model-id: qwen3.8-27b       (the name clients send as "model")
+    shutdown-timeout: 10s
+  api:
+    default-max-tokens: 4096
+    max-concurrent-generations: 1
+    max-queued-generations: 16
+    request-timeout: 30m

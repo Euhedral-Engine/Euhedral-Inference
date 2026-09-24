@@ -1,0 +1,197 @@
+{
+  "cases": [
+    {
+      "name": "user_only",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "expected": "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "name": "system_and_user",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are terse."
+        },
+        {
+          "role": "user",
+          "content": "Name a prime."
+        }
+      ],
+      "expected": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nName a prime.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "name": "blank_system",
+      "messages": [
+        {
+          "role": "system",
+          "content": "  \n "
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        }
+      ],
+      "expected": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "name": "multi_turn",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be helpful."
+        },
+        {
+          "role": "user",
+          "content": "What is 2+2?"
+        },
+        {
+          "role": "assistant",
+          "content": "4"
+        },
+        {
+          "role": "user",
+          "content": "And 3+3?"
+        }
+      ],
+      "expected": "<|im_start|>system\nBe helpful.<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n4<|im_end|>\n<|im_start|>user\nAnd 3+3?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "name": "assistant_prefill_history",
+      "messages": [
+        {
+          "role": "user",
+          "content": "a"
+        },
+        {
+          "role": "assistant",
+          "content": "b"
+        },
+        {
+          "role": "user",
+          "content": "c"
+        },
+        {
+          "role": "assistant",
+          "content": "d"
+        },
+        {
+          "role": "user",
+          "content": "e"
+        }
+      ],
+      "expected": "<|im_start|>user\na<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nb<|im_end|>\n<|im_start|>user\nc<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nd<|im_end|>\n<|im_start|>user\ne<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "name": "text_parts",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Part one. "
+            },
+            {
+              "type": "text",
+              "text": "Part two."
+            }
+          ]
+        }
+      ],
+      "expected": "<|im_start|>user\nPart one. Part two.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "name": "whitespace_trim",
+      "messages": [
+        {
+          "role": "user",
+          "content": "\u00a0 padded \n\t\u0085"
+        }
+      ],
+      "expected": "<|im_start|>user\npadded<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "name": "unicode",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Translate: caf\u00e9 \u2192 \u65e5\u672c\u8a9e \ud83d\ude00"
+        }
+      ],
+      "expected": "<|im_start|>user\nTranslate: caf\u00e9 \u2192 \u65e5\u672c\u8a9e \ud83d\ude00<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "name": "assistant_null_content",
+      "messages": [
+        {
+          "role": "user",
+          "content": "x"
+        },
+        {
+          "role": "assistant",
+          "content": null
+        },
+        {
+          "role": "user",
+          "content": "y"
+        }
+      ],
+      "expected": "<|im_start|>user\nx<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<|im_end|>\n<|im_start|>user\ny<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "name": "assistant_last",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Say hi"
+        },
+        {
+          "role": "assistant",
+          "content": "Hi"
+        }
+      ],
+      "expected": "<|im_start|>user\nSay hi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    }
+  ],
+  "errors": [
+    {
+      "name": "no_user",
+      "messages": [
+        {
+          "role": "system",
+          "content": "s"
+        }
+      ],
+      "message": "No user query found in messages."
+    },
+    {
+      "name": "system_not_first",
+      "messages": [
+        {
+          "role": "user",
+          "content": "u"
+        },
+        {
+          "role": "system",
+          "content": "s"
+        }
+      ],
+      "message": "System message must be at the beginning."
+    },
+    {
+      "name": "tool_response_only",
+      "messages": [
+        {
+          "role": "user",
+          "content": "<tool_response>x</tool_response>"
+        }
+      ],
+      "message": "No user query found in messages."
+    }
+  ]
+}

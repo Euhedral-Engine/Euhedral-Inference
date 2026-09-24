@@ -4,6 +4,11 @@ import org.gradle.api.tasks.SourceSetContainer
 import org.gradle.api.tasks.testing.Test
 import org.gradle.jvm.toolchain.JavaLanguageVersion
 
+plugins {
+    alias(libs.plugins.spotless) apply false
+    alias(libs.plugins.spring.boot) apply false
+}
+
 val nativeBuildDirectory = layout.buildDirectory.dir("native")
 val nativeLibraryFileName = when {
     System.getProperty("os.name").lowercase().contains("windows") -> "euhedral_cuda.dll"
@@ -58,6 +63,7 @@ subprojects {
             exclude("**/QwenFullModelCudaIntegrationTest.class")
             exclude("**/QwenGenerationSessionCudaIntegrationTest.class")
             exclude("**/InferenceEngineCudaIntegrationTest.class")
+            exclude("**/ChatCompletionsCudaIntegrationTest.class")
             useJUnitPlatform()
         }
         val testSourceSet = the<SourceSetContainer>()["test"]
@@ -79,6 +85,7 @@ subprojects {
             include("**/QwenFullModelCudaIntegrationTest.class")
             include("**/QwenGenerationSessionCudaIntegrationTest.class")
             include("**/InferenceEngineCudaIntegrationTest.class")
+            include("**/ChatCompletionsCudaIntegrationTest.class")
             systemProperty(
                     "euhedral.cuda.library",
                     nativeBuildDirectory.get().dir("lib").file(nativeLibraryFileName).asFile.absolutePath)
