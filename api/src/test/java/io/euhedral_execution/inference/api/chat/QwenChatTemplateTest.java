@@ -262,6 +262,14 @@ class QwenChatTemplateTest {
     }
 
     @Test
+    void acceptsCheckpointTemplateWithCrLfLineEndings() throws IOException {
+        String source = resource("/qwen-chat-template.jinja").replace("\n", "\r\n");
+        QwenChatTemplate.fromTemplateSource(source);
+        String changed = source.replace("'<think>\\n\\n</think>\\n\\n'", "'<think>\\n</think>\\n'");
+        assertThrows(IOException.class, () -> QwenChatTemplate.fromTemplateSource(changed));
+    }
+
+    @Test
     void loadsFromJinjaFileOrTokenizerConfig(@TempDir Path directory) throws IOException {
         String source = resource("/qwen-chat-template.jinja");
         assertThrows(IOException.class, () -> QwenChatTemplate.load(directory));
