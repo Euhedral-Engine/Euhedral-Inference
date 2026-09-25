@@ -7,6 +7,7 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.Objects;
+import java.util.function.IntPredicate;
 
 /// Bridges retained Qwen BF16 logits to the independent host-side token sampler.
 /// Keep one instance per generation so its seeded random state is request-local.
@@ -20,6 +21,11 @@ public final class QwenLogitsSampler {
 
     /// Copies only the final vocabulary row and does not close or otherwise claim the logits allocation.
     public int selectToken(QwenDeviceLogits logits, ExecutionGpu gpu) {
+        return selectToken(logits, gpu, null);
+    }
+
+    /// Applies a request-local vocabulary constraint before temperature, top-k, or top-p sampling.
+    public int selectToken(QwenDeviceLogits logits, ExecutionGpu gpu, IntPredicate allowed) {
         Objects.requireNonNull(logits, "logits");
         Objects.requireNonNull(gpu, "gpu");
         int vocabularySize = logits.vocabularySize();
@@ -35,7 +41,9 @@ public final class QwenLogitsSampler {
             float[] hostLogits = new float[vocabularySize];
             for (int tokenId = 0; tokenId < vocabularySize; tokenId++) {
                 short bf16Bits = row.get(ValueLayout.JAVA_SHORT, (long) tokenId * Short.BYTES);
-                hostLogits[tokenId] = Float.intBitsToFloat(Short.toUnsignedInt(bf16Bits) << 16);
+                hostLogits[tokenId] = allowed != null && !allowed.test(tokenId)
+                        ? Float.NEGATIVE_INFINITY
+                        : Float.intBitsToFloat(Short.toUnsignedInt(bf16Bits) << 16);
             }
             return this.sampler.selectToken(hostLogits);
         }

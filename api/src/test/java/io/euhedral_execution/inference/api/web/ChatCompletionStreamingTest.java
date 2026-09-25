@@ -4,16 +4,19 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.euhedral_execution.inference.api.engine.InferenceBackend;
+import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -24,7 +27,10 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 /// Streaming and disconnect behavior against a real Tomcat connector, without CUDA.
-@SpringBootTest(classes = ScriptedApiApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(
+        classes = ScriptedApiApplication.class,
+        properties = "euhedral.test.scripted-api=true",
+        webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Timeout(60)
 class ChatCompletionStreamingTest {
     private static final String MODEL = ScriptedInferenceBackend.MODEL_ID;
@@ -39,6 +45,26 @@ class ChatCompletionStreamingTest {
     @BeforeEach
     void resetBackend() {
         this.backend.reset();
+    }
+
+    @Test
+    void chunkedOversizedToolSchemaIsRejectedWithoutAContentLength() throws Exception {
+        String body = "{\"model\":\"" + MODEL + "\",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}],"
+                + "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"description\":\""
+                + "x".repeat(1_048_576) + "\"}}]}";
+        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+        var request = HttpRequest.newBuilder(URI.create("http://localhost:" + this.port + "/v1/chat/completions"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofInputStream(() -> new ByteArrayInputStream(bytes)))
+                .build();
+        try (var client = HttpClient.newHttpClient()) {
+            var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            assertEquals(413, response.statusCode());
+            assertEquals(
+                    "request_too_large",
+                    JSON.readTree(response.body()).get("error").get("code").asString());
+        }
+        assertTrue(this.backend.generations.isEmpty(), "oversized requests must not open sessions");
     }
 
     @Test
@@ -119,6 +145,147 @@ class ChatCompletionStreamingTest {
         var generation = this.backend.only();
         assertTrue(generation.awaitClosed());
         assertEquals(1, generation.closeCount.get());
+    }
+
+    /// Text streams as it is decoded; JSON tool calls arrive complete in `delta.tool_calls` chunks.
+    @Test
+    void streamDeliversTextThenToolCallDeltasThenToolCallsFinish() throws Exception {
+        var textSeen = new CountDownLatch(1);
+        String call = "{\"tool_calls\":[{\"name\":\"f\",\"arguments\":{\"n\":7}},"
+                + "{\"name\":\"g\",\"arguments\":{\"n\":7}}]}";
+        this.backend.script = (generation, max, output) -> {
+            generation.emit(output, "Checking.");
+            // The call cannot begin until the client holds the text: tool mode must not buffer content.
+            if (!textSeen.await(10, TimeUnit.SECONDS))
+                throw new ExecutionException(new AssertionError("text was not delivered while generating"));
+            generation.emit(output, "\n\n{\"tool_");
+            generation.emit(output, call.substring("{\"tool_".length()));
+            return new InferenceBackend.Result(4, true);
+        };
+        String tools = "[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\","
+                + "\"properties\":{\"n\":{\"type\":\"integer\"}}}}},"
+                + "{\"type\":\"function\",\"function\":{\"name\":\"g\"}}]";
+        List<String> data = streamEvents(
+                "{\"model\":\"" + MODEL + "\",\"stream\":true,\"stream_options\":{\"include_usage\":true},"
+                        + "\"tools\":" + tools + ",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}",
+                event -> {
+                    if (event.contains("\"Checking.\"")) textSeen.countDown();
+                });
+
+        assertEquals("[DONE]", data.getLast());
+        List<JsonNode> chunks = new ArrayList<>();
+        for (String event : data.subList(0, data.size() - 1)) chunks.add(JSON.readTree(event));
+        assertEquals(6, chunks.size(), data.toString());
+        assertEquals(
+                "assistant",
+                chunks.get(0).get("choices").get(0).get("delta").get("role").asString());
+        assertEquals(
+                "Checking.",
+                chunks.get(1).get("choices").get(0).get("delta").get("content").asString());
+        List<String> ids = new ArrayList<>();
+        for (int index = 0; index < 2; index++) {
+            JsonNode choice = chunks.get(2 + index).get("choices").get(0);
+            assertTrue(choice.get("finish_reason").isNull());
+            JsonNode delta = choice.get("delta");
+            assertTrue(delta.get("content") == null, delta.toString());
+            assertEquals(1, delta.get("tool_calls").size());
+            JsonNode toolCall = delta.get("tool_calls").get(0);
+            assertEquals(index, toolCall.get("index").asInt());
+            assertEquals("function", toolCall.get("type").asString());
+            assertTrue(toolCall.get("id").asString().startsWith("call_"));
+            ids.add(toolCall.get("id").asString());
+            assertEquals(
+                    index == 0 ? "f" : "g", toolCall.get("function").get("name").asString());
+            assertEquals(
+                    index == 0 ? "{\"n\":7}" : "{\"n\":7}",
+                    toolCall.get("function").get("arguments").asString());
+        }
+        assertTrue(!ids.get(0).equals(ids.get(1)), "tool call IDs must be unique");
+        JsonNode terminal = chunks.get(4).get("choices").get(0);
+        assertEquals("tool_calls", terminal.get("finish_reason").asString());
+        assertTrue(terminal.get("delta").isEmpty());
+        assertEquals(4, chunks.get(5).get("usage").get("completion_tokens").asInt());
+        for (String event : data) assertTrue(!event.contains("<tool_call>") && !event.contains("<function"), event);
+        var generation = this.backend.only();
+        assertTrue(generation.awaitClosed());
+        assertEquals(1, generation.closeCount.get());
+    }
+
+    /// Text held back as a possible stop-sequence prefix is released before the call that follows it.
+    @Test
+    void streamReleasesHeldBackTextBeforeTheToolCall() throws Exception {
+        this.backend.script = ScriptedInferenceBackend.tokens(
+                List.of("Answer ST", "{\"tool_calls\":[{\"name\":\"f\",\"arguments\":{}}]}"), true);
+        List<String> data = streamEvents(
+                "{\"model\":\"" + MODEL + "\",\"stream\":true,\"stop\":[\"STOP\"],\"tools\":[{\"type\":\"function\","
+                        + "\"function\":{\"name\":\"f\"}}],\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}",
+                event -> {});
+        List<String> order = new ArrayList<>();
+        StringBuilder text = new StringBuilder();
+        for (String event : data.subList(1, data.size() - 1)) {
+            JsonNode choice = JSON.readTree(event).get("choices").get(0);
+            JsonNode delta = choice.get("delta");
+            if (delta.has("content")) {
+                assertTrue(order.isEmpty(), "text must arrive before the call");
+                text.append(delta.get("content").asString());
+            } else if (delta.has("tool_calls")) order.add("call");
+            else order.add("finish:" + choice.get("finish_reason").asString());
+        }
+        assertEquals("Answer ST", text.toString());
+        assertEquals(List.of("call", "finish:tool_calls"), order);
+    }
+
+    /// An invalid call after streamed text ends the stream with an in-band error and no `[DONE]`.
+    @Test
+    void streamReportsAnInvalidToolCallInBand() throws Exception {
+        this.backend.script = ScriptedInferenceBackend.tokens(
+                List.of("Sure.", " <tool_call>\n<function=nope>\n</function>\n</tool_call>", "tail"), false);
+        List<String> data = streamEvents(
+                "{\"model\":\"" + MODEL + "\",\"stream\":true,\"tools\":[{\"type\":\"function\","
+                        + "\"function\":{\"name\":\"f\"}}],\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}",
+                event -> {});
+        JsonNode error = JSON.readTree(data.getLast());
+        assertEquals("invalid_tool_call", error.get("error").get("code").asString());
+        assertTrue(data.stream().noneMatch(event -> event.equals("[DONE]")), data.toString());
+        assertEquals(
+                "Sure.",
+                JSON.readTree(data.get(1))
+                        .get("choices")
+                        .get(0)
+                        .get("delta")
+                        .get("content")
+                        .asString());
+        var generation = this.backend.only();
+        assertTrue(generation.awaitClosed());
+        assertTrue(generation.isCancelled(), "an invalid call must stop decoding");
+        assertEquals(2, generation.emitted.get());
+    }
+
+    private List<String> streamEvents(String body, Consumer<String> onEvent) throws Exception {
+        var request = HttpRequest.newBuilder(URI.create("http://localhost:" + this.port + "/v1/chat/completions"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+        try (var client = HttpClient.newHttpClient()) {
+            HttpResponse<java.util.stream.Stream<String>> response =
+                    client.send(request, HttpResponse.BodyHandlers.ofLines());
+            assertEquals(200, response.statusCode());
+            List<String> data = new ArrayList<>();
+            var lines = response.body().iterator();
+            boolean expectData = true;
+            while (lines.hasNext()) {
+                String line = lines.next();
+                if (expectData) {
+                    assertTrue(line.startsWith("data:"), "each event must be a single data field: " + line);
+                    data.add(line.substring("data:".length()).strip());
+                    onEvent.accept(data.getLast());
+                } else {
+                    assertEquals("", line, "events must be separated by a blank line");
+                }
+                expectData = !expectData;
+            }
+            return data;
+        }
     }
 
     @Test

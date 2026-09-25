@@ -7,8 +7,10 @@ import java.util.Map;
 
 /// Supported subset of an OpenAI Chat Completions request.
 ///
-/// `stop` is a string or a list of strings. Every other top-level field is captured in `otherFields`
-/// and classified by `ChatRequestMapper` as ignorable metadata, a neutral default, or a rejected feature.
+/// `stop` is a string or a list of strings. `tools` and `tool_choice` stay untyped JSON (maps, lists, and
+/// scalars) so `ChatRequestMapper` can report precise errors and render tool schemas in their original
+/// key order. Every other top-level field is captured in `otherFields` and classified by
+/// `ChatRequestMapper` as ignorable metadata, a neutral default, or a rejected feature.
 public record ChatCompletionRequest(
         String model,
         List<ChatMessage> messages,
@@ -20,6 +22,9 @@ public record ChatCompletionRequest(
         @JsonProperty("top_p") Double topP,
         Long seed,
         Object stop,
+        Object tools,
+        @JsonProperty("tool_choice") Object toolChoice,
+        @JsonProperty("parallel_tool_calls") Boolean parallelToolCalls,
         @JsonAnySetter Map<String, Object> otherFields) {
 
     public ChatCompletionRequest {

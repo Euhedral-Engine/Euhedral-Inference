@@ -324,8 +324,8 @@ class ChatCompletionsCudaIntegrationTest {
         }
 
         @Override
-        public Generation openGeneration(GenerationConfig config) {
-            Generation generation = this.delegate.openGeneration(config);
+        public Generation openGeneration(GenerationConfig config, ToolConstraint constraint) {
+            Generation generation = this.delegate.openGeneration(config, constraint);
             this.opened.incrementAndGet();
             return new Generation() {
                 @Override

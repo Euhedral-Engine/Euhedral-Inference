@@ -25,4 +25,5 @@ euhedral:
     default-max-tokens: 4096
     max-concurrent-generations: 1
     max-queued-generations: 16
+    max-request-bytes: 1048576
     request-timeout: 30m

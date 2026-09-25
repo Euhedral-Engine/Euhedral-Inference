@@ -39,6 +39,18 @@ class QwenLogitsSamplerTest {
     }
 
     @Test
+    void constrainedSelectionMasksTokensBeforeApplyingTopK() {
+        FakeGpu gpu = new FakeGpu(LOGITS_ADDRESS, new short[] {bf16(10.0f), bf16(9.0f), bf16(1.0f)});
+        QwenLogitsSampler sampler = new QwenLogitsSampler(new GenerationConfig(1.0f, 1, 1.0f, 7L, false), 3);
+
+        try (QwenDeviceLogits logits = new QwenDeviceLogits(gpu, LOGITS_ADDRESS, 1, 3)) {
+            assertEquals(1, sampler.selectToken(logits, gpu, tokenId -> tokenId == 1));
+            assertThrows(IllegalArgumentException.class, () -> sampler.selectToken(logits, gpu, tokenId -> false));
+        }
+        assertEquals(List.of(LOGITS_ADDRESS), gpu.freedAddresses);
+    }
+
+    @Test
     void selectionRejectsDifferentGpuAndVocabularyMismatch() {
         FakeGpu owner = new FakeGpu(LOGITS_ADDRESS, new short[] {bf16(1.0f), bf16(2.0f)});
         FakeGpu otherGpu = new FakeGpu(LOGITS_ADDRESS, new short[] {bf16(1.0f), bf16(2.0f)});

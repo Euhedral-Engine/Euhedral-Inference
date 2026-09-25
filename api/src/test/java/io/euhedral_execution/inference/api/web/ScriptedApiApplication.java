@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
@@ -16,12 +17,14 @@ import org.springframework.context.annotation.Import;
 /// The production web layer with the engine replaced by `ScriptedInferenceBackend`.
 /// Imports components explicitly so the engine configuration is never scanned.
 @SpringBootConfiguration
+@ConditionalOnProperty(name = "euhedral.test.scripted-api", havingValue = "true")
 @EnableAutoConfiguration
 @EnableConfigurationProperties(ApiProperties.class)
 @Import({
     OpenAiController.class,
     HealthController.class,
     OpenAiErrorHandler.class,
+    ChatRequestBodyLimit.class,
     ChatCompletionService.class,
     ChatRequestMapper.class
 })

@@ -15,6 +15,7 @@ import io.euhedral_execution.core.impl.BaseCloneableObject;
 import io.euhedral_execution.core.impl.DefaultExecutor;
 import io.euhedral_execution.hardware_utils.SystemInfo;
 import io.euhedral_execution.inference.core.sampling.GenerationConfig;
+import io.euhedral_execution.inference.core.tokenizer.JsonEnvelopeConstraint;
 import io.euhedral_execution.inference.core.tokenizer.QwenTokenizer;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
@@ -139,6 +140,80 @@ class QwenGenerationSessionTest {
             assertTrue(gpu.frees.contains(recurrentAddress));
             assertTrue(gpu.frees.contains(keyCacheAddress));
             assertThrows(IllegalStateException.class, () -> ((GdnSequenceStates) recurrentState).forLayer(0));
+        } finally {
+            session.close();
+            lattice.close();
+        }
+    }
+
+    @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS)
+    void longPromptPrefillsInBoundedQuantaWithoutChangingTheTokenSequence() throws Exception {
+        int vocabularySize = testVocabularySize();
+        var weights = QwenExecutionFixtures.statefulCompactWeights(vocabularySize);
+        var plan = new QwenExecutionPlan(weights);
+        var gpu = new SamplingGpu(vocabularySize);
+        gpu.selectedTokenId = 1;
+        var lattice = createLattice();
+        var runtime = new EuhedralInferenceRuntime(lattice, plan, gpu);
+        var session = new QwenGenerationSession(tokenizer, plan, runtime, gpu, 816, GenerationConfig.greedy(47L));
+        String prompt = "! ".repeat(800);
+        int[] encoded = tokenizer.encodeWithModelSpecialTokens(prompt);
+        assertTrue(encoded.length > 512);
+        lattice.start();
+        awaitWorker(lattice);
+        try {
+            assertEquals(List.of(1), session.generate(prompt, 1, ignored -> {}));
+            assertTrue(gpu.embeddingInputs.size() > 2, "a long prompt needs more than one prefill quantum");
+            assertTrue(
+                    gpu.embeddingInputs.size() - 1 <= (encoded.length + 511) / 512,
+                    "prefill must not pay a per-quantum overhead for unnecessarily small chunks");
+            List<Integer> observed = new ArrayList<>();
+            long position = 0;
+            for (int index = 0; index < gpu.embeddingInputs.size() - 1; index++) {
+                int[] chunk = gpu.embeddingInputs.get(index);
+                assertTrue(chunk.length <= 512, "prefill workspace must be bounded");
+                assertEquals(position, gpu.attentionStartPositions.get(index));
+                for (int token : chunk) observed.add(token);
+                position += chunk.length;
+            }
+            assertEquals(encoded.length, position);
+            for (int index = 0; index < encoded.length; index++) assertEquals(encoded[index], observed.get(index));
+            assertArrayEquals(new int[] {1}, gpu.embeddingInputs.getLast());
+            assertEquals(encoded.length + 1L, session.currentTokenPosition());
+            assertEquals(1, gpu.sampledLogitRows.size(), "only the final prefill chunk should sample");
+            assertEquals(gpu.sampledLogitRows, gpu.sampledLogitCloses);
+            assertTrue(gpu.pendingLogits.isEmpty());
+            assertFalse(runtime.hasAttachedRunner());
+        } finally {
+            session.close();
+            lattice.close();
+        }
+    }
+
+    @Test
+    @Timeout(value = 60, unit = TimeUnit.SECONDS)
+    void constrainedGenerationMasksXmlBeforeSamplingAndClosesDeviceLogits() throws Exception {
+        int vocabularySize = testVocabularySize();
+        var weights = QwenExecutionFixtures.statefulCompactWeights(vocabularySize);
+        var plan = new QwenExecutionPlan(weights);
+        var gpu = new SamplingGpu(vocabularySize);
+        int xmlToken = tokenizer.encodeText("<")[0];
+        gpu.selectedTokenId = xmlToken;
+        var lattice = createLattice();
+        var runtime = new EuhedralInferenceRuntime(lattice, plan, gpu);
+        var session = new QwenGenerationSession(tokenizer, plan, runtime, gpu, 817, GenerationConfig.greedy(48L));
+        var constraint = new JsonEnvelopeConstraint(tokenizer, List.of("read_file"), true);
+        lattice.start();
+        awaitWorker(lattice);
+        try {
+            StringBuilder output = new StringBuilder();
+            List<Integer> generated = session.generate("!", 1, output::append, constraint);
+            assertEquals(1, generated.size());
+            assertTrue(output.toString().startsWith("{"));
+            assertFalse(generated.contains(xmlToken));
+            assertEquals(gpu.sampledLogitRows, gpu.sampledLogitCloses);
+            assertFalse(runtime.hasAttachedRunner());
         } finally {
             session.close();
             lattice.close();

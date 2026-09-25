@@ -15,7 +15,8 @@ public record ChatCompletionPlan(
         GenerationConfig sampling,
         List<String> stops,
         boolean stream,
-        boolean includeUsage) {
+        boolean includeUsage,
+        ToolCalling tools) {
 
     public ChatCompletionPlan {
         stops = List.copyOf(stops);

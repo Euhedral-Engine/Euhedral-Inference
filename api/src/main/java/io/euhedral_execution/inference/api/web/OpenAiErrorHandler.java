@@ -33,6 +33,9 @@ public class OpenAiErrorHandler {
 
     @ExceptionHandler(HttpMessageNotReadableException.class)
     ResponseEntity<OpenAiError> unreadable(HttpMessageNotReadableException exception) {
+        for (Throwable cause = exception; cause != null; cause = cause.getCause()) {
+            if (cause instanceof ChatRequestBodyLimit.TooLarge) return openAi(OpenAiException.requestTooLarge());
+        }
         LOG.debug("Unreadable request body", exception);
         return openAi(OpenAiException.invalidRequest(
                 "We could not parse the JSON body of your request. Check that it is valid JSON and that each"

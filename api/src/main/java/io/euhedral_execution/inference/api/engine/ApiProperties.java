@@ -14,6 +14,7 @@ public record ApiProperties(
         @DefaultValue("4096") int defaultMaxTokens,
         @DefaultValue("1") int maxConcurrentGenerations,
         @DefaultValue("16") int maxQueuedGenerations,
+        @DefaultValue("1048576") int maxRequestBytes,
         @DefaultValue("30m") Duration requestTimeout) {
 
     public ApiProperties {
@@ -23,6 +24,7 @@ public record ApiProperties(
             throw new IllegalArgumentException("euhedral.api.max-concurrent-generations must be positive");
         if (maxQueuedGenerations < 0)
             throw new IllegalArgumentException("euhedral.api.max-queued-generations must not be negative");
+        if (maxRequestBytes <= 0) throw new IllegalArgumentException("euhedral.api.max-request-bytes must be positive");
         if (requestTimeout == null || requestTimeout.isNegative() || requestTimeout.isZero())
             throw new IllegalArgumentException("euhedral.api.request-timeout must be positive");
     }

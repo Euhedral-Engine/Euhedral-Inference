@@ -43,6 +43,7 @@ public final class QwenTokenizer {
     private final boolean addEosToken;
     private final int[] byteByCodePoint;
     private final int[] codePointByByte;
+    private volatile byte[][] generatedTokenBytes;
 
     private QwenTokenizer(
             List<String> tokensById,
@@ -298,6 +299,34 @@ public final class QwenTokenizer {
 
     boolean isControlTokenId(int tokenId) {
         return this.controlTokenIdsById.contains(tokenId);
+    }
+
+    /// Returns borrowed, immutable-by-convention BPE bytes; control and absent IDs have no text bytes.
+    byte[] generationTokenBytes(int tokenId) {
+        byte[][] cached = this.generatedTokenBytes;
+        if (cached == null) {
+            synchronized (this) {
+                cached = this.generatedTokenBytes;
+                if (cached == null) {
+                    cached = new byte[this.tokensById.size()][];
+                    for (int id = 0; id < cached.length; id++) {
+                        String token = this.tokensById.get(id);
+                        if (token == null || isControlTokenId(id)) continue;
+                        byte[] bytes = new byte[token.codePointCount(0, token.length())];
+                        for (int index = 0, offset = 0; index < token.length(); offset++) {
+                            int codePoint = token.codePointAt(index);
+                            int value = byteForCodePoint(codePoint);
+                            if (value < 0) throw new IllegalStateException("Qwen BPE token has no byte mapping");
+                            bytes[offset] = (byte) value;
+                            index += Character.charCount(codePoint);
+                        }
+                        cached[id] = bytes;
+                    }
+                    this.generatedTokenBytes = cached;
+                }
+            }
+        }
+        return tokenId < 0 || tokenId >= cached.length ? null : cached[tokenId];
     }
 
     String tokenText(int tokenId) {
