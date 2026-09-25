@@ -24,6 +24,22 @@ class InferenceEngineTest {
     @TempDir
     Path directory;
 
+    @Test
+    void latticeConstructionReceivesTheLoadedGpuForWorkerBinding() throws Exception {
+        var selected = new java.util.concurrent.atomic.AtomicReference<ExecutionGpu>();
+        var bootstrap = new FakeBootstrap() {
+            @Override
+            io.euhedral_execution.core.control_plane.ControlPlaneLattice createLattice(
+                    InferenceConfig config, ExecutionGpu gpu) {
+                selected.set(gpu);
+                return super.createLattice(config, gpu);
+            }
+        };
+        try (var engine = InferenceEngine.load(config(), bootstrap)) {
+            assertSame(bootstrap.gpu, selected.get());
+        }
+    }
+
     private static int trackedSessions(InferenceEngine engine) {
         try {
             var field = InferenceEngine.class.getDeclaredField("sessions");

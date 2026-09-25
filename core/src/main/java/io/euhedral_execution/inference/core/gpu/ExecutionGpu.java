@@ -48,6 +48,25 @@ public abstract class ExecutionGpu implements GpuMemory {
         return false;
     }
 
+    /// Reserves a persistent stream for a cloned lattice worker.
+    public long openWorker(int cpu) {
+        return cpu;
+    }
+
+    /// Releases a cloned worker's stream after its executor closes.
+    public void closeWorker(long worker) {}
+
+    /// Blocks GPU teardown while the lattice still owns worker resources.
+    public void ensureWorkersClosed() {}
+
+    /// Retires clones from an incomplete startup, before requests can be admitted.
+    public void abortWorkerStartup() {}
+
+    /// Binds a lattice worker's GPU resources around its frame body.
+    public void withWorker(long worker, Runnable operation) {
+        operation.run();
+    }
+
     /// Runs one instruction's submission in the GPU's selected execution mode.
     public void submit(Runnable operation) {
         operation.run();

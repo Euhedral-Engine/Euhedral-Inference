@@ -3,6 +3,7 @@ package io.euhedral_execution.inference.core;
 import io.euhedral_execution.core.config.LatticeConfig;
 import io.euhedral_execution.core.control_plane.ControlPlaneLattice;
 import io.euhedral_execution.core.control_plane.ControlPlaneShard;
+import io.euhedral_execution.core.generics.AbstractExecutor;
 import io.euhedral_execution.core.impl.BaseCloneableObject;
 import io.euhedral_execution.core.impl.DefaultExecutor;
 import io.euhedral_execution.inference.core.gpu.CudaGpuMemory;
@@ -13,6 +14,7 @@ import io.euhedral_execution.inference.core.model_loader.artifact.QwenArtifactRe
 import io.euhedral_execution.inference.core.model_loader.config.QwenConfig;
 import io.euhedral_execution.inference.core.sampling.GenerationConfig;
 import io.euhedral_execution.inference.core.scheduling.EuhedralInferenceRuntime;
+import io.euhedral_execution.inference.core.scheduling.InferenceGpuExecutor;
 import io.euhedral_execution.inference.core.scheduling.QwenExecutionPlan;
 import io.euhedral_execution.inference.core.scheduling.QwenGenerationSession;
 import io.euhedral_execution.inference.core.tokenizer.QwenTokenizer;
@@ -105,7 +107,7 @@ public final class InferenceEngine implements AutoCloseable {
             gpu = bootstrap.openGpu(config.cudaLibraryPath(), tuning.gpuExecutionMode());
             model = bootstrap.loadModel(config.artifactPath(), artifact, gpu);
             QwenExecutionPlan plan = new QwenExecutionPlan(model.weights());
-            lattice = bootstrap.createLattice(config);
+            lattice = bootstrap.createLattice(config, gpu);
             bootstrap.startLattice(lattice);
             EuhedralInferenceRuntime runtime = new EuhedralInferenceRuntime(lattice, plan, gpu);
             return new InferenceEngine(
@@ -162,12 +164,14 @@ public final class InferenceEngine implements AutoCloseable {
         @Override
         public synchronized void close() {
             if (this.cleaned) return;
+            if (this.gpu != null) this.gpu.abortWorkerStartup();
             if (this.lattice != null) {
                 LAST_CLOSED_LATTICE.set(this.lattice);
                 this.lattice.close();
                 this.lattice = null;
             }
             if (this.model != null) {
+                if (this.gpu != null) this.gpu.ensureWorkersClosed();
                 try {
                     this.model.close();
                 } catch (RuntimeException | Error cleanup) {
@@ -290,6 +294,7 @@ public final class InferenceEngine implements AutoCloseable {
             // All inference sources have drained before fabric shutdown, even if fabric teardown is asynchronous.
             LAST_CLOSED_LATTICE.set(this.lattice);
             this.lattice.close();
+            this.gpu.ensureWorkersClosed();
             this.model.close();
             this.bootstrap.closeGpu(this.gpu);
             this.resourcesClosed = true;
@@ -370,9 +375,16 @@ public final class InferenceEngine implements AutoCloseable {
             return QwenModel.load(path, artifact, gpu);
         }
 
+        ControlPlaneLattice createLattice(InferenceConfig config, ExecutionGpu gpu) {
+            return gpu.asynchronous() ? createLattice(config, new InferenceGpuExecutor(gpu)) : createLattice(config);
+        }
+
         ControlPlaneLattice createLattice(InferenceConfig config) {
-            var shard =
-                    ControlPlaneShard.createBaseShard("InferenceShard", new BaseCloneableObject(new DefaultExecutor()));
+            return createLattice(config, new DefaultExecutor());
+        }
+
+        private ControlPlaneLattice createLattice(InferenceConfig config, AbstractExecutor executor) {
+            var shard = ControlPlaneShard.createBaseShard("InferenceShard", new BaseCloneableObject(executor));
             var latticeConfig =
                     new LatticeConfig("InferenceLattice", config.workerCpus(), config.shutdownTimeout(), shard);
             long started = System.nanoTime();

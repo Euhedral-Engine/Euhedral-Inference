@@ -164,6 +164,12 @@ int euhedral_cuda_stream_destroy(uint64_t value) {
     return status == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int)status;
 }
 
+int euhedral_cuda_stream_synchronize(uint64_t value) {
+    if (value == 0) return EUHEDRAL_CUDA_INVALID_ARGUMENT;
+    cudaError_t status = cudaStreamSynchronize((cudaStream_t)(uintptr_t)value);
+    return status == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int)status;
+}
+
 int euhedral_cuda_stream_select(uint64_t value) {
     if (value == 0 || selected_stream != NULL) return EUHEDRAL_CUDA_INVALID_ARGUMENT;
     selected_stream = (cudaStream_t)(uintptr_t)value;

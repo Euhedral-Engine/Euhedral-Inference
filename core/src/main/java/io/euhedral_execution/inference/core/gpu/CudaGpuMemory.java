@@ -42,6 +42,7 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
     private final MethodHandle synchronize;
     private final MethodHandle streamCreate;
     private final MethodHandle streamDestroy;
+    private final MethodHandle streamSynchronize;
     private final MethodHandle streamSelect;
     private final MethodHandle streamClear;
     private final MethodHandle eventCreate;
@@ -52,9 +53,13 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
     private final MemorySegment completionCallback;
     private final boolean asynchronous;
     private final long stream;
+    private final ConcurrentHashMap<Long, Long> workerStreams = new ConcurrentHashMap<>();
+    private final AtomicLong nextWorker = new AtomicLong();
+    private final ThreadLocal<StreamSelection> selectedStreams = ThreadLocal.withInitial(StreamSelection::new);
     private final ConcurrentHashMap<Long, Completion> completions = new ConcurrentHashMap<>();
     private final AtomicLong nextCompletion = new AtomicLong();
     private final AtomicReference<Throwable> poisoned = new AtomicReference<>();
+    private boolean workerStartupAborted;
     private final MpmcQueue<Long> availableEvents = new MpmcQueue<>(64, 4);
     private volatile Consumer<Runnable> completionSink;
     private final MethodHandle rmsNormBf16;
@@ -105,6 +110,13 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
                             linker,
                             symbols,
                             "euhedral_cuda_stream_destroy",
+                            FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG))
+                    : null;
+            this.streamSynchronize = asynchronous
+                    ? bind(
+                            linker,
+                            symbols,
+                            "euhedral_cuda_stream_synchronize",
                             FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG))
                     : null;
             this.streamSelect = asynchronous
@@ -205,6 +217,76 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
         return this.asynchronous;
     }
 
+    long workerStream(long worker) {
+        return workerStreams.getOrDefault(worker, 0L);
+    }
+
+    @Override
+    public synchronized long openWorker(int cpu) {
+        ensureOpen();
+        if (workerStartupAborted) throw new IllegalStateException("CUDA worker startup was aborted");
+        if (!asynchronous) return cpu;
+        long worker = nextWorker.incrementAndGet();
+        if (worker <= 0) throw new IllegalStateException("CUDA worker identifiers exhausted");
+        try {
+            long created = (long) streamCreate.invokeExact();
+            if (created == 0) throw new GpuMemoryException("CUDA worker stream creation failed");
+            workerStreams.put(worker, created);
+            return worker;
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new GpuMemoryException("CUDA worker stream creation invocation failed", failure);
+        }
+    }
+
+    @Override
+    public synchronized void closeWorker(long worker) {
+        if (!asynchronous) return;
+        Long selected = workerStreams.get(worker);
+        if (selected == null) return;
+        try {
+            int status = (int) streamDestroy.invokeExact(selected.longValue());
+            if (status != 0) throw new GpuMemoryException("CUDA worker stream destruction", status);
+            workerStreams.remove(worker, selected);
+        } catch (GpuMemoryException failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new GpuMemoryException("CUDA worker stream destruction invocation failed", failure);
+        }
+    }
+
+    @Override
+    public synchronized void ensureWorkersClosed() {
+        if (!workerStreams.isEmpty()) throw new IllegalStateException("CUDA lattice workers have not closed");
+    }
+
+    @Override
+    public synchronized void abortWorkerStartup() {
+        workerStartupAborted = true;
+        // No inference runner exists until load completes. Clones omitted from a partially
+        // published shard have no close hook, so retire every pre-admission stream here.
+        for (long worker : workerStreams.keySet()) closeWorker(worker);
+    }
+
+    @Override
+    public void withWorker(long worker, Runnable operation) {
+        if (!asynchronous) {
+            operation.run();
+            return;
+        }
+        long selected = workerStream(worker);
+        if (selected == 0) throw new IllegalStateException("CUDA worker stream was not opened: " + worker);
+        StreamSelection selection = selectedStreams.get();
+        long previous = selection.worker;
+        selection.worker = selected;
+        try {
+            operation.run();
+        } finally {
+            selection.worker = previous;
+        }
+    }
+
     @Override
     public void poison(Throwable failure) {
         Objects.requireNonNull(failure, "failure");
@@ -235,10 +317,13 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
             operation.run();
             return;
         }
+        StreamSelection selection = selectedStreams.get();
+        long target = selection.worker == 0 ? stream : selection.worker;
         try {
-            int status = (int) streamSelect.invokeExact(stream);
+            int status = (int) streamSelect.invokeExact(target);
             if (status != 0) throw new GpuMemoryException("CUDA submission stream selection", status);
             try {
+                selection.submitted = target;
                 operation.run();
             } finally {
                 streamClear.invokeExact();
@@ -253,6 +338,20 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
     @Override
     public void prepare(Runnable initialization) {
         submit(initialization);
+        if (!asynchronous) return;
+        // Admission precedes graph publication. Finish initialization on its own stream
+        // before any of the independent worker streams may read its buffers.
+        StreamSelection selection = selectedStreams.get();
+        long target = selection.submitted;
+        selection.submitted = 0;
+        try {
+            int status = (int) streamSynchronize.invokeExact(target);
+            if (status != 0) throw new GpuMemoryException("CUDA initialization stream synchronization", status);
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new GpuMemoryException("CUDA initialization stream synchronization failed", failure);
+        }
     }
 
     @Override
@@ -262,17 +361,20 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
         if (completionSink == null) throw new IllegalStateException("CUDA completion sink is not attached");
         long event = 0;
         long token = 0;
+        StreamSelection selection = selectedStreams.get();
+        long target = selection.submitted == 0 ? stream : selection.submitted;
+        selection.submitted = 0;
         try {
             Long cached = availableEvents.poll();
             event = cached == null ? (long) eventCreate.invokeExact() : cached;
             if (event == 0) throw new GpuMemoryException("CUDA event creation returned null");
-            int status = (int) eventRecord.invokeExact(event, stream);
+            int status = (int) eventRecord.invokeExact(event, target);
             if (status != 0) throw new GpuMemoryException("CUDA event record", status);
             token = nextCompletion.incrementAndGet();
             if (token <= 0) throw new IllegalStateException("CUDA completion identifiers exhausted");
             completions.put(token, new Completion(event, completed, failed, new AtomicBoolean()));
             ensureHealthy();
-            status = (int) completionNotify.invokeExact(stream, completionCallback, token);
+            status = (int) completionNotify.invokeExact(target, completionCallback, token);
             if (status != 0) throw new GpuMemoryException("CUDA completion notification", status);
         } catch (Throwable failure) {
             // Failed event registration cannot prove that a previously launched kernel stopped.
@@ -377,6 +479,11 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
     }
 
     private record Completion(long event, Runnable completed, Consumer<Throwable> failed, AtomicBoolean finalized) {}
+
+    private static final class StreamSelection {
+        private long worker;
+        private long submitted;
+    }
 
     @Override
     public long allocate(long byteSize) {
@@ -1025,6 +1132,12 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
             synchronize();
             for (Long event; (event = availableEvents.poll()) != null; ) destroyEvent(event);
             try {
+                for (var entry : workerStreams.entrySet()) {
+                    long workerStream = entry.getValue();
+                    int status = (int) streamDestroy.invokeExact(workerStream);
+                    if (status != 0) throw new GpuMemoryException("CUDA worker stream destruction", status);
+                    workerStreams.remove(entry.getKey(), workerStream);
+                }
                 int status = (int) streamDestroy.invokeExact(stream);
                 if (status != 0) throw new GpuMemoryException("CUDA stream destruction", status);
             } catch (GpuMemoryException failure) {
