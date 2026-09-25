@@ -19,6 +19,95 @@ import org.junit.jupiter.api.Test;
 
 class QwenExecutionContextTest {
     @Test
+    void failedAsyncPreparationAfterInitializationFailsWithoutFreeingUnprovenWork() {
+        var plan = new QwenExecutionPlan(QwenExecutionFixtures.weights());
+        class FailedPrepareGpu extends QwenExecutionFixtures.RecordingGpu {
+            boolean poisoned;
+
+            @Override
+            public boolean asynchronous() {
+                return true;
+            }
+
+            @Override
+            public void prepare(Runnable initialization) {
+                initialization.run();
+                throw new IllegalStateException("post-initialization submission failure");
+            }
+
+            @Override
+            public void synchronize() {
+                throw new IllegalStateException("recovery failed");
+            }
+
+            @Override
+            public void poison(Throwable failure) {
+                poisoned = true;
+            }
+
+            @Override
+            public void free(long address) {
+                if (poisoned) throw new IllegalStateException("allocation retained");
+                super.free(address);
+            }
+        }
+        var gpu = new FailedPrepareGpu();
+        var runner = new QwenExecutionRunner(plan, gpu);
+        var context = new QwenExecutionContext(
+                plan, new QwenSequenceState(899), QwenExecutionContext.ExecutionKind.DECODE, 0, new int[] {1});
+        assertThrows(IllegalStateException.class, () -> runner.submit(context));
+        assertTrue(gpu.poisoned);
+        assertTrue(context.outcome().isDone());
+        assertEquals(
+                QwenExecutionContext.Status.FAILED, context.outcome().join().status());
+        assertTrue(gpu.frees.isEmpty());
+        runner.completeGracefully();
+    }
+
+    @Test
+    void failedAsyncInitializationRetainsBuffersIfRecoveryCannotComplete() throws Exception {
+        var plan = new QwenExecutionPlan(
+                QwenExecutionFixtures.weights(),
+                QwenExecutionFixtures.norm(),
+                List.of(QwenExecutionFixtures.q3("projection", 64, 201)));
+        class InitializationFailureGpu extends QwenExecutionFixtures.RecordingGpu {
+            boolean poisoned;
+
+            @Override
+            public boolean asynchronous() {
+                return true;
+            }
+
+            @Override
+            public void synchronize() {
+                throw new IllegalStateException("GPU recovery failed");
+            }
+
+            @Override
+            public void poison(Throwable failure) {
+                poisoned = true;
+            }
+
+            @Override
+            public void free(long address) {
+                if (poisoned) throw new IllegalStateException("unproven allocation retained");
+                super.free(address);
+            }
+        }
+        var gpu = new InitializationFailureGpu();
+        gpu.failAllocationAt = 2;
+        var runner = new QwenExecutionRunner(plan, gpu);
+        var context = new QwenExecutionContext(
+                plan, new QwenSequenceState(900), QwenExecutionContext.ExecutionKind.DECODE, 0, new int[] {1});
+        assertEquals(
+                QwenExecutionContext.Status.FAILED,
+                runner.submit(context).get(2, TimeUnit.SECONDS).status());
+        assertTrue(gpu.poisoned);
+        assertEquals(0, gpu.frees.size());
+        runner.completeGracefully();
+    }
+
+    @Test
     void cancellationCleanupFailureStillPublishesOutcomeAndCanBeRetried() throws Exception {
         var plan = new QwenExecutionPlan(QwenExecutionFixtures.weights());
         var gpu = new QwenExecutionFixtures.RecordingGpu();

@@ -17,6 +17,7 @@ import io.euhedral_execution.core.generics.LatticeSource;
 import io.euhedral_execution.core.generics.LatticeTerminal;
 import io.euhedral_execution.core.impl.BaseCloneableObject;
 import io.euhedral_execution.core.impl.DefaultExecutor;
+import io.euhedral_execution.data_structures.queues.MpscQueue;
 import io.euhedral_execution.hardware_utils.SystemInfo;
 import io.euhedral_execution.inference.core.gpu.ExecutionGpu;
 import io.euhedral_execution.inference.core.model_loader.QwenWeightLoader;
@@ -36,10 +37,12 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.parallel.Execution;
@@ -50,6 +53,104 @@ class EuhedralInferenceRuntimeLatticeTest {
 
     private static final Path DEFAULT_COMPACT_ARTIFACT =
             Path.of("/mnt/shared/qwen38-quant/artifacts/qwen3_5_27b_compact_q3.edrl");
+
+    @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    void realLatticePollsAsyncGpuCompletionFrameWithoutAnObserver() throws Exception {
+        BitSet cpus = twoWorkerCpus();
+        assumeTrue(!cpus.isEmpty());
+        var lattice = createLattice(cpus);
+        var gpu = new CompletionGpu();
+        try {
+            lattice.start();
+            var runtime =
+                    new EuhedralInferenceRuntime(lattice, new QwenExecutionPlan(QwenExecutionFixtures.weights()), gpu);
+            var completed = new CountDownLatch(1);
+            gpu.signal(completed::countDown);
+            assertTrue(completed.await(10, TimeUnit.SECONDS), "lattice did not execute the signaled completion frame");
+            runtime.disconnectRunner();
+        } finally {
+            lattice.close();
+        }
+    }
+
+    @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    void deferredGpuWorkKeepsDependenciesPendingUntilEachCompletionFrameRuns() throws Exception {
+        BitSet cpus = twoWorkerCpus();
+        assumeTrue(!cpus.isEmpty());
+        var lattice = createLattice(cpus);
+        var gpu = new DeferredGpu();
+        var plan = new QwenExecutionPlan(
+                QwenExecutionFixtures.weights(),
+                QwenExecutionFixtures.norm(),
+                List.of(QwenExecutionFixtures.q3("projection", 64, 201)));
+        lattice.start();
+        var runtime = new EuhedralInferenceRuntime(lattice, plan, gpu);
+        try (var caller = java.util.concurrent.Executors.newSingleThreadExecutor()) {
+            var context = new QwenExecutionContext(
+                    plan, new QwenSequenceState(5801), QwenExecutionContext.ExecutionKind.DECODE, 0, new int[] {1});
+            var outcome = caller.submit(() -> runtime.execute(List.of(context)));
+            for (int instruction = 0; instruction < plan.instructions().size(); instruction++) {
+                assertFalse(outcome.isDone(), "dependencies became terminal before GPU completion");
+                gpu.completeNext();
+            }
+            assertEquals(
+                    QwenExecutionContext.Status.SUCCESS,
+                    outcome.get(10, TimeUnit.SECONDS).getFirst().status());
+            assertEquals(0, gpu.synchronizations, "normal async execution must not use a device-wide barrier");
+        } finally {
+            runtime.closeCompletionSink();
+            lattice.close();
+        }
+    }
+
+    private static final class DeferredGpu extends QwenExecutionFixtures.RecordingGpu {
+        private final MpscQueue<Runnable> pending = new MpscQueue<>(64);
+        private final Semaphore available = new Semaphore(0);
+        private Consumer<Runnable> completionSink;
+
+        @Override
+        public boolean asynchronous() {
+            return true;
+        }
+
+        @Override
+        public void bindCompletionSink(Consumer<Runnable> sink) {
+            this.completionSink = sink;
+        }
+
+        @Override
+        public void deferCompletion(Runnable completed, Consumer<Throwable> failed) {
+            pending.offer(completed);
+            available.release();
+        }
+
+        void completeNext() throws InterruptedException {
+            assertTrue(available.tryAcquire(10, TimeUnit.SECONDS), "GPU work was never submitted");
+            Runnable completion = pending.poll();
+            assertTrue(completion != null);
+            completionSink.accept(completion);
+        }
+    }
+
+    private static final class CompletionGpu extends QwenExecutionFixtures.RecordingGpu {
+        private Consumer<Runnable> completionSink;
+
+        @Override
+        public boolean asynchronous() {
+            return true;
+        }
+
+        @Override
+        public void bindCompletionSink(Consumer<Runnable> sink) {
+            this.completionSink = sink;
+        }
+
+        void signal(Runnable completion) {
+            this.completionSink.accept(completion);
+        }
+    }
 
     @Test
     @Timeout(value = 60, unit = TimeUnit.SECONDS)

@@ -11,7 +11,7 @@ import java.util.Objects;
 /// [WorkerProcessorSelection] to derive them from topology. The set is copied on input and output.
 /// `prefillChunkTokens` bounds the prompt tokens submitted per prefill quantum and therefore the
 /// per-quantum GPU workspace. It does not change the token sequence.
-public record InferenceTuning(BitSet workerProcessorIds, int prefillChunkTokens) {
+public record InferenceTuning(BitSet workerProcessorIds, int prefillChunkTokens, GpuExecutionMode gpuExecutionMode) {
     public static final int DEFAULT_PREFILL_CHUNK_TOKENS = QwenGenerationSession.DEFAULT_PREFILL_CHUNK_TOKENS;
 
     public InferenceTuning {
@@ -19,11 +19,16 @@ public record InferenceTuning(BitSet workerProcessorIds, int prefillChunkTokens)
                 Objects.requireNonNull(workerProcessorIds, "workerProcessorIds").clone();
         if (workerProcessorIds.isEmpty()) throw new IllegalArgumentException("workerProcessorIds must not be empty");
         if (prefillChunkTokens <= 0) throw new IllegalArgumentException("prefillChunkTokens must be positive");
+        gpuExecutionMode = Objects.requireNonNull(gpuExecutionMode, "gpuExecutionMode");
+    }
+
+    public InferenceTuning(BitSet workerProcessorIds, int prefillChunkTokens) {
+        this(workerProcessorIds, prefillChunkTokens, GpuExecutionMode.SYNC);
     }
 
     /// Default tuning for the given workers: the engine's existing prefill chunk size.
     public static InferenceTuning defaults(BitSet workerProcessorIds) {
-        return new InferenceTuning(workerProcessorIds, DEFAULT_PREFILL_CHUNK_TOKENS);
+        return new InferenceTuning(workerProcessorIds, DEFAULT_PREFILL_CHUNK_TOKENS, GpuExecutionMode.SYNC);
     }
 
     /// Default tuning for a resolved selection.
@@ -32,11 +37,15 @@ public record InferenceTuning(BitSet workerProcessorIds, int prefillChunkTokens)
     }
 
     public InferenceTuning withWorkerProcessorIds(BitSet ids) {
-        return new InferenceTuning(ids, this.prefillChunkTokens);
+        return new InferenceTuning(ids, this.prefillChunkTokens, this.gpuExecutionMode);
     }
 
     public InferenceTuning withPrefillChunkTokens(int tokens) {
-        return new InferenceTuning(this.workerProcessorIds, tokens);
+        return new InferenceTuning(this.workerProcessorIds, tokens, this.gpuExecutionMode);
+    }
+
+    public InferenceTuning withGpuExecutionMode(GpuExecutionMode mode) {
+        return new InferenceTuning(this.workerProcessorIds, this.prefillChunkTokens, mode);
     }
 
     @Override

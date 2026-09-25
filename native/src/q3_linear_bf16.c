@@ -53,8 +53,9 @@ int euhedral_cuda_linear_q3_bf16(const void* input, const void* weights, void* o
     unsigned int rows_arg = rows, in_arg = in_features, out_arg = out_features;
     unsigned long long scale_arg = scale_offset;
     void* params[] = {&input_ptr, &weights_ptr, &output_ptr, &rows_arg, &in_arg, &out_arg, &scale_arg};
-    CUresult status = cuLaunchKernel(function, (unsigned int)grid, 1, 1, 128, 1, 1, 0, NULL, params, NULL);
+    CUresult status = cuLaunchKernel(function, (unsigned int)grid, 1, 1, 128, 1, 1, 0, euhedral_cuda_submission_stream(), params, NULL);
     if (status != CUDA_SUCCESS) return (int)status;
+    if (euhedral_cuda_submission_stream() != NULL) return EUHEDRAL_CUDA_SUCCESS;
     cudaError_t sync = cudaDeviceSynchronize();
     return sync == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int)sync;
 }

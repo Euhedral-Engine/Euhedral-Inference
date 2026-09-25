@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.euhedral_execution.inference.benchmark.prompt.PromptMaterial;
+import io.euhedral_execution.inference.core.GpuExecutionMode;
 import io.euhedral_execution.inference.core.InferenceTuning;
 import io.euhedral_execution.inference.core.sampling.GenerationConfig;
 import java.io.IOException;
@@ -48,7 +49,8 @@ public record BenchmarkOptions(
         @JsonProperty("append") Boolean append,
         @JsonProperty("gpuMemory") Boolean gpuMemory,
         @JsonProperty("gpuHeadroomMiB") Long gpuHeadroomMiB,
-        @JsonProperty("shutdownTimeoutSeconds") Long shutdownTimeoutSeconds) {
+        @JsonProperty("shutdownTimeoutSeconds") Long shutdownTimeoutSeconds,
+        @JsonProperty("gpuExecutionMode") GpuExecutionMode gpuExecutionMode) {
 
     static final ObjectMapper JSON = new ObjectMapper();
 
@@ -72,6 +74,7 @@ public record BenchmarkOptions(
         gpuMemory = gpuMemory != null && gpuMemory;
         gpuHeadroomMiB = gpuHeadroomMiB == null ? 1024L : gpuHeadroomMiB;
         shutdownTimeoutSeconds = shutdownTimeoutSeconds == null ? 10L : shutdownTimeoutSeconds;
+        gpuExecutionMode = gpuExecutionMode == null ? GpuExecutionMode.SYNC : gpuExecutionMode;
 
         if (cpus.isEmpty()) throw new IllegalArgumentException("cpus must not be blank");
         for (int id : excludeCpus) if (id < 0) throw new IllegalArgumentException("excludeCpus must not be negative");
@@ -88,6 +91,48 @@ public record BenchmarkOptions(
         if (append && isJson(output)) throw new IllegalArgumentException("append requires JSONL output");
         if (gpuHeadroomMiB < 0) throw new IllegalArgumentException("gpuHeadroomMiB must not be negative");
         if (shutdownTimeoutSeconds <= 0) throw new IllegalArgumentException("shutdownTimeoutSeconds must be positive");
+    }
+
+    /// Compatibility constructor for callers that do not select experimental GPU execution.
+    public BenchmarkOptions(
+            Path artifact,
+            Path tokenizer,
+            Path cudaLibrary,
+            String cpus,
+            List<Integer> excludeCpus,
+            List<Integer> excludeCores,
+            List<Integer> prefillChunks,
+            List<Scenario> scenarios,
+            Integer warmup,
+            Integer iterations,
+            Generation generation,
+            Long promptSeed,
+            Path output,
+            Boolean overwrite,
+            Boolean append,
+            Boolean gpuMemory,
+            Long gpuHeadroomMiB,
+            Long shutdownTimeoutSeconds) {
+        this(
+                artifact,
+                tokenizer,
+                cudaLibrary,
+                cpus,
+                excludeCpus,
+                excludeCores,
+                prefillChunks,
+                scenarios,
+                warmup,
+                iterations,
+                generation,
+                promptSeed,
+                output,
+                overwrite,
+                append,
+                gpuMemory,
+                gpuHeadroomMiB,
+                shutdownTimeoutSeconds,
+                GpuExecutionMode.SYNC);
     }
 
     /// Sampling settings. `greedy` (default) selects argmax, so temperature/topK/topP are rejected;
@@ -153,7 +198,8 @@ public record BenchmarkOptions(
                 options.append(),
                 options.gpuMemory(),
                 options.gpuHeadroomMiB(),
-                options.shutdownTimeoutSeconds());
+                options.shutdownTimeoutSeconds(),
+                options.gpuExecutionMode());
     }
 
     public boolean json() {
@@ -167,7 +213,8 @@ public record BenchmarkOptions(
     /// One engine load per prefill-chunk value; each runs every scenario.
     public List<InferenceTuning> sweep(InferenceTuning base) {
         List<InferenceTuning> tunings = new ArrayList<>();
-        for (int chunk : this.prefillChunks) tunings.add(base.withPrefillChunkTokens(chunk));
+        for (int chunk : this.prefillChunks)
+            tunings.add(base.withPrefillChunkTokens(chunk).withGpuExecutionMode(this.gpuExecutionMode));
         return tunings;
     }
 

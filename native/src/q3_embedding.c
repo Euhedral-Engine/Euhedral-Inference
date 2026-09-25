@@ -329,13 +329,8 @@ int euhedral_cuda_embed_q3(
             1,
             1,
             0,
-            NULL,
+            euhedral_cuda_submission_stream(),
             kernel_parameters,
             NULL);
     return status == CUDA_SUCCESS ? EUHEDRAL_CUDA_SUCCESS : (int) status;
-}
-
-int euhedral_cuda_synchronize(void) {
-    cudaError_t status = cudaDeviceSynchronize();
-    return status == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int) status;
 }

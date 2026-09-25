@@ -11,6 +11,7 @@ import java.lang.foreign.ValueLayout;
 
 /// Runs the embedding lookup instruction and owns its temporary token-ID upload until finalization.
 public final class EmbeddingFrame extends QwenInstructionFrame {
+    private ExecutionGpu.UploadBuffer pendingUpload;
 
     public EmbeddingFrame(
             long idHash,
@@ -26,26 +27,49 @@ public final class EmbeddingFrame extends QwenInstructionFrame {
     protected void perform(QwenExecutionContext context, QwenExecutionPlan.Instruction instruction) {
         int[] ids = context.inputTokenIds();
         long bytes = (long) ids.length * Integer.BYTES;
+        if (gpu().asynchronous()) {
+            this.pendingUpload = gpu().allocateUploadBuffer(bytes);
+            uploadAndEmbed(context, instruction, ids, bytes, this.pendingUpload.segment(), true);
+            return;
+        }
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment host = arena.allocate(bytes, Integer.BYTES);
-            for (int index = 0; index < ids.length; index++) {
-                host.set(ValueLayout.JAVA_INT, (long) index * Integer.BYTES, ids[index]);
-            }
-            long tokenBuffer = context.allocateTemporaryTokenIds(gpu(), bytes);
-            gpu().copyHostToDevice(tokenBuffer, host, bytes);
-            gpu().embedQ3(
-                            tokenBuffer,
-                            instruction.weightAddress(),
-                            instruction.weightByteSize(),
-                            context.workspace().hiddenStateAddress(),
-                            ids.length,
-                            context.plan().weights().config().vocabSize(),
-                            instruction.outputWidth());
+            uploadAndEmbed(context, instruction, ids, bytes, host, false);
         }
+    }
+
+    private void uploadAndEmbed(
+            QwenExecutionContext context,
+            QwenExecutionPlan.Instruction instruction,
+            int[] ids,
+            long bytes,
+            MemorySegment host,
+            boolean deferred) {
+        for (int index = 0; index < ids.length; index++) {
+            host.set(ValueLayout.JAVA_INT, (long) index * Integer.BYTES, ids[index]);
+        }
+        long tokenBuffer = context.allocateTemporaryTokenIds(gpu(), bytes);
+        if (deferred) gpu().copyUploadToDevice(tokenBuffer, this.pendingUpload);
+        else gpu().copyHostToDevice(tokenBuffer, host, bytes);
+        gpu().embedQ3(
+                        tokenBuffer,
+                        instruction.weightAddress(),
+                        instruction.weightByteSize(),
+                        context.workspace().hiddenStateAddress(),
+                        ids.length,
+                        context.plan().weights().config().vocabSize(),
+                        instruction.outputWidth());
     }
 
     @Override
     protected void releaseTemporary(QwenExecutionContext context) {
-        context.releaseTemporaryTokenIds(gpu());
+        try {
+            context.releaseTemporaryTokenIds(gpu());
+        } finally {
+            ExecutionGpu.UploadBuffer upload = this.pendingUpload;
+            this.pendingUpload = null;
+            // A poisoned GPU cannot prove that DMA has stopped reading pinned host memory.
+            if (upload != null && gpu().completionProven()) upload.close();
+        }
     }
 }

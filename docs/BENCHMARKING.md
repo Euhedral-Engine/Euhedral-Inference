@@ -109,6 +109,7 @@ against the working directory, which is the repository root under `./gradlew :be
 | `overwrite`, `append` | `false` | Required when `output` exists. `append` is JSONL only. |
 | `gpuMemory` | `false` | Record device free/total memory before and after each iteration, outside timing. |
 | `gpuHeadroomMiB` | `1024` | Free memory required beyond the artifact size before loading. |
+| `gpuExecutionMode` | `SYNC` | `SYNC` (default) or `ASYNC_EXPERIMENTAL`. The latter submits GPU work to a CUDA stream and finalizes completed instructions through Euhedral completion frames. |
 | `shutdownTimeoutSeconds` | `10` | Engine shutdown timeout. |
 
 CPU selection uses the core `ProcessorTopology`. Unavailable IDs are rejected, not dropped. On hosts
@@ -225,7 +226,7 @@ below is illustrative; its values are not a measurement.
   "timings": {"tokenization": 0, "prefill": 0, "firstTokenSample": 0, "timeToFirstToken": 0, "decode": 0,
               "decodeQuantaSum": 0, "finalCommit": 0, "timeToLastToken": 0, "endToEnd": 0},
   "throughput": {"prefillTokensPerSecond": 0.0, "decodeTokensPerSecond": 0.0, "endToEndOutputTokensPerSecond": 0.0},
-  "engine": {"schemaVersion": 1, "tuning": {"workerProcessorIds": [0, 1], "prefillChunkTokens": 512},
+  "engine": {"schemaVersion": 1, "tuning": {"workerProcessorIds": [0, 1], "prefillChunkTokens": 512, "gpuExecutionMode": "SYNC"},
              "workerCoreIds": [0], "model": {}, "generation": {}, "runtime": {}},
   "gpuMemory": {"beforeFreeBytes": 0, "afterFreeBytes": 0, "totalBytes": 0}
 }

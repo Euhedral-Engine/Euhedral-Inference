@@ -94,8 +94,10 @@ static int ensure_initialized(void) {
 }
 
 static int launch_and_synchronize(CUfunction function, uint32_t grid_x, uint32_t block_x, void** parameters) {
-    CUresult status = cuLaunchKernel(function, grid_x, 1, 1, block_x, 1, 1, 0, NULL, parameters, NULL);
+    CUresult status = cuLaunchKernel(function, grid_x, 1, 1, block_x, 1, 1, 0,
+            euhedral_cuda_submission_stream(), parameters, NULL);
     if (status != CUDA_SUCCESS) return (int)status;
+    if (euhedral_cuda_submission_stream() != NULL) return EUHEDRAL_CUDA_SUCCESS;
     cudaError_t sync = cudaDeviceSynchronize();
     return sync == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int)sync;
 }
@@ -307,6 +309,11 @@ int euhedral_cuda_zero_device_memory(void* device_address, uint64_t byte_size) {
     if (device_address == NULL || byte_size == 0) return EUHEDRAL_CUDA_INVALID_ARGUMENT;
     int status = euhedral_cuda_bind_thread_context();
     if (status != EUHEDRAL_CUDA_SUCCESS) return status;
+    cudaStream_t stream = euhedral_cuda_submission_stream();
+    if (stream != NULL) {
+        cudaError_t result = cudaMemsetAsync(device_address, 0, (size_t)byte_size, stream);
+        return result == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int)result;
+    }
     cudaError_t result = cudaMemset(device_address, 0, (size_t)byte_size);
     if (result != cudaSuccess) return (int)result;
     result = cudaDeviceSynchronize();

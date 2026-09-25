@@ -3,6 +3,9 @@
 
 #include <stdint.h>
 
+/* Thread-local launch selection; NULL preserves the synchronous ABI. */
+void* euhedral_cuda_submission_stream(void);
+
 #ifdef _WIN32
 #define EUHEDRAL_CUDA_EXPORT __declspec(dllexport)
 #else
@@ -21,9 +24,16 @@ extern "C" {
 
 EUHEDRAL_CUDA_EXPORT void* euhedral_cuda_malloc(uint64_t byte_size);
 EUHEDRAL_CUDA_EXPORT int euhedral_cuda_free(void* address);
+EUHEDRAL_CUDA_EXPORT void* euhedral_cuda_host_malloc(uint64_t byte_size);
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_host_free(void* address);
 EUHEDRAL_CUDA_EXPORT int euhedral_cuda_device_memory_info(uint64_t* free_byte_size, uint64_t* total_byte_size);
 
 EUHEDRAL_CUDA_EXPORT int euhedral_cuda_copy_host_to_device(
+        void* device_address,
+        const void* host_address,
+        uint64_t byte_size);
+/// Requires a pinned host allocation retained through stream completion.
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_copy_upload_to_device(
         void* device_address,
         const void* host_address,
         uint64_t byte_size);
@@ -188,6 +198,18 @@ EUHEDRAL_CUDA_EXPORT int euhedral_cuda_attention_causal_bf16(
         uint64_t start_position);
 
 EUHEDRAL_CUDA_EXPORT int euhedral_cuda_synchronize(void);
+EUHEDRAL_CUDA_EXPORT uint64_t euhedral_cuda_stream_create(void);
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_stream_destroy(uint64_t stream);
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_stream_select(uint64_t stream);
+EUHEDRAL_CUDA_EXPORT void euhedral_cuda_stream_clear(void);
+EUHEDRAL_CUDA_EXPORT uint64_t euhedral_cuda_completion_event_create(void);
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_completion_event_record(uint64_t event, uint64_t stream);
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_completion_event_query(uint64_t event);
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_completion_event_destroy(uint64_t event);
+/// Schedules a notification after preceding stream work and the recorded event.
+/// The callback must not call CUDA APIs or finalize frames.
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_completion_notify(
+        uint64_t stream, void (*callback)(uint64_t, int), uint64_t token);
 
 #ifdef __cplusplus
 }

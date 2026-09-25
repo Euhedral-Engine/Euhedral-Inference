@@ -8,10 +8,26 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 #if !defined(CUDA_VERSION) || CUDA_VERSION < 13010
 #error "Euhedral CUDA ABI requires CUDA toolkit 13.1 or newer"
 #endif
+
+#ifdef _WIN32
+static __declspec(thread) cudaStream_t selected_stream;
+#else
+static _Thread_local cudaStream_t selected_stream;
+#endif
+
+void* euhedral_cuda_submission_stream(void) {
+    return selected_stream;
+}
+
+int euhedral_cuda_synchronize(void) {
+    cudaError_t status = cudaDeviceSynchronize();
+    return status == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int)status;
+}
 
 void* euhedral_cuda_malloc(uint64_t byte_size) {
     if (byte_size == 0 || byte_size > SIZE_MAX) {
@@ -32,6 +48,19 @@ int euhedral_cuda_free(void* address) {
 
     cudaError_t status = cudaFree(address);
     return status == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int) status;
+}
+
+void* euhedral_cuda_host_malloc(uint64_t byte_size) {
+    if (byte_size == 0 || byte_size > SIZE_MAX) return NULL;
+    void* address = NULL;
+    if (cudaHostAlloc(&address, (size_t)byte_size, cudaHostAllocDefault) != cudaSuccess) return NULL;
+    return address;
+}
+
+int euhedral_cuda_host_free(void* address) {
+    if (address == NULL) return EUHEDRAL_CUDA_SUCCESS;
+    cudaError_t status = cudaFreeHost(address);
+    return status == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int)status;
 }
 
 int euhedral_cuda_device_memory_info(uint64_t* free_byte_size, uint64_t* total_byte_size) {
@@ -65,12 +94,25 @@ int euhedral_cuda_copy_host_to_device(
         return EUHEDRAL_CUDA_SIZE_OVERFLOW;
     }
 
-    cudaError_t status = cudaMemcpy(
-            device_address,
-            host_address,
-            (size_t) byte_size,
-            cudaMemcpyHostToDevice);
+    cudaStream_t stream = euhedral_cuda_submission_stream();
+    cudaError_t status = stream == NULL
+            ? cudaMemcpy(device_address, host_address, (size_t)byte_size, cudaMemcpyHostToDevice)
+            : cudaMemcpyAsync(device_address, host_address, (size_t)byte_size, cudaMemcpyHostToDevice, stream);
+    // EmbeddingFrame closes its host arena on return, so an async upload must finish here.
+    if (status == cudaSuccess && stream != NULL) status = cudaStreamSynchronize(stream);
     return status == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int) status;
+}
+
+int euhedral_cuda_copy_upload_to_device(
+        void* device_address,
+        const void* host_address,
+        uint64_t byte_size) {
+    if (device_address == NULL || host_address == NULL || byte_size == 0) return EUHEDRAL_CUDA_INVALID_ARGUMENT;
+    if (byte_size > SIZE_MAX) return EUHEDRAL_CUDA_SIZE_OVERFLOW;
+    cudaStream_t stream = euhedral_cuda_submission_stream();
+    if (stream == NULL) return EUHEDRAL_CUDA_INVALID_ARGUMENT;
+    cudaError_t status = cudaMemcpyAsync(device_address, host_address, (size_t)byte_size, cudaMemcpyHostToDevice, stream);
+    return status == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int)status;
 }
 
 int euhedral_cuda_copy_device_to_host(
@@ -87,11 +129,11 @@ int euhedral_cuda_copy_device_to_host(
         return EUHEDRAL_CUDA_SIZE_OVERFLOW;
     }
 
-    cudaError_t status = cudaMemcpy(
-            host_address,
-            device_address,
-            (size_t) byte_size,
-            cudaMemcpyDeviceToHost);
+    cudaStream_t stream = euhedral_cuda_submission_stream();
+    cudaError_t status = stream == NULL
+            ? cudaMemcpy(host_address, device_address, (size_t)byte_size, cudaMemcpyDeviceToHost)
+            : cudaMemcpyAsync(host_address, device_address, (size_t)byte_size, cudaMemcpyDeviceToHost, stream);
+    if (status == cudaSuccess && stream != NULL) status = cudaStreamSynchronize(stream);
     return status == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int) status;
 }
 
@@ -102,7 +144,83 @@ int euhedral_cuda_copy_device_to_device(
     if (byte_size == 0) return EUHEDRAL_CUDA_SUCCESS;
     if (destination_address == NULL || source_address == NULL) return EUHEDRAL_CUDA_INVALID_ARGUMENT;
     if (byte_size > SIZE_MAX) return EUHEDRAL_CUDA_SIZE_OVERFLOW;
-    cudaError_t status = cudaMemcpy(
-            destination_address, source_address, (size_t)byte_size, cudaMemcpyDeviceToDevice);
+    cudaStream_t stream = euhedral_cuda_submission_stream();
+    cudaError_t status = stream == NULL
+            ? cudaMemcpy(destination_address, source_address, (size_t)byte_size, cudaMemcpyDeviceToDevice)
+            : cudaMemcpyAsync(destination_address, source_address, (size_t)byte_size, cudaMemcpyDeviceToDevice, stream);
+    // Async KV growth retains its old allocation until the recorded completion event.
+    return status == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int)status;
+}
+
+uint64_t euhedral_cuda_stream_create(void) {
+    cudaStream_t stream = NULL;
+    if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) != cudaSuccess) return 0;
+    return (uint64_t)(uintptr_t)stream;
+}
+
+int euhedral_cuda_stream_destroy(uint64_t value) {
+    if (value == 0) return EUHEDRAL_CUDA_INVALID_ARGUMENT;
+    cudaError_t status = cudaStreamDestroy((cudaStream_t)(uintptr_t)value);
+    return status == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int)status;
+}
+
+int euhedral_cuda_stream_select(uint64_t value) {
+    if (value == 0 || selected_stream != NULL) return EUHEDRAL_CUDA_INVALID_ARGUMENT;
+    selected_stream = (cudaStream_t)(uintptr_t)value;
+    return EUHEDRAL_CUDA_SUCCESS;
+}
+
+void euhedral_cuda_stream_clear(void) {
+    selected_stream = NULL;
+}
+
+uint64_t euhedral_cuda_completion_event_create(void) {
+    cudaEvent_t event = NULL;
+    if (cudaEventCreateWithFlags(&event, cudaEventDisableTiming) != cudaSuccess) return 0;
+    return (uint64_t)(uintptr_t)event;
+}
+
+int euhedral_cuda_completion_event_record(uint64_t value, uint64_t stream) {
+    if (value == 0 || stream == 0) return EUHEDRAL_CUDA_INVALID_ARGUMENT;
+    cudaError_t status = cudaEventRecord((cudaEvent_t)(uintptr_t)value, (cudaStream_t)(uintptr_t)stream);
+    return status == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int)status;
+}
+
+int euhedral_cuda_completion_event_query(uint64_t value) {
+    if (value == 0) return EUHEDRAL_CUDA_INVALID_ARGUMENT;
+    cudaError_t status = cudaEventQuery((cudaEvent_t)(uintptr_t)value);
+    if (status == cudaSuccess) return EUHEDRAL_CUDA_SUCCESS;
+    if (status == cudaErrorNotReady) return -5;
+    return (int)status;
+}
+
+int euhedral_cuda_completion_event_destroy(uint64_t value) {
+    if (value == 0) return EUHEDRAL_CUDA_SUCCESS;
+    cudaError_t status = cudaEventDestroy((cudaEvent_t)(uintptr_t)value);
+    return status == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int)status;
+}
+
+struct completion_notification {
+    void (*callback)(uint64_t, int);
+    uint64_t token;
+};
+
+static void CUDART_CB notify_completion(cudaStream_t stream, cudaError_t status, void* user_data) {
+    (void)stream;
+    struct completion_notification* notification = (struct completion_notification*)user_data;
+    void (*callback)(uint64_t, int) = notification->callback;
+    uint64_t token = notification->token;
+    free(notification);
+    callback(token, (int)status);
+}
+
+int euhedral_cuda_completion_notify(uint64_t value, void (*callback)(uint64_t, int), uint64_t token) {
+    if (value == 0 || callback == NULL || token == 0) return EUHEDRAL_CUDA_INVALID_ARGUMENT;
+    struct completion_notification* notification = malloc(sizeof(*notification));
+    if (notification == NULL) return EUHEDRAL_CUDA_SIZE_OVERFLOW;
+    notification->callback = callback;
+    notification->token = token;
+    cudaError_t status = cudaStreamAddCallback((cudaStream_t)(uintptr_t)value, notify_completion, notification, 0);
+    if (status != cudaSuccess) free(notification);
     return status == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int)status;
 }

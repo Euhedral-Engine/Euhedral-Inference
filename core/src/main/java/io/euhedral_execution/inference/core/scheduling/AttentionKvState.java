@@ -44,6 +44,7 @@ public final class AttentionKvState implements AutoCloseable {
             throw new IllegalArgumentException("KV append exceeds reserved capacity");
         }
         this.length = Math.addExact(this.length, tokenCount);
+        if (this.gpu.asynchronous()) releaseRetired();
     }
 
     public long keyCacheAddress() {
@@ -74,14 +75,10 @@ public final class AttentionKvState implements AutoCloseable {
     public void close() {
         if (this.closed) return;
         Throwable failure = null;
-        for (int index = this.retiredAddresses.size() - 1; index >= 0; index--) {
-            long retired = this.retiredAddresses.get(index);
-            try {
-                this.gpu.free(retired);
-                this.retiredAddresses.remove(index);
-            } catch (Throwable cleanupFailure) {
-                failure = combine(failure, cleanupFailure);
-            }
+        try {
+            releaseRetired();
+        } catch (Throwable cleanupFailure) {
+            failure = combine(failure, cleanupFailure);
         }
         if (this.address != 0) {
             try {
@@ -94,6 +91,20 @@ public final class AttentionKvState implements AutoCloseable {
             }
         }
         this.closed = this.address == 0 && this.retiredAddresses.isEmpty();
+        if (failure != null) throw propagate(failure);
+    }
+
+    private void releaseRetired() {
+        Throwable failure = null;
+        for (int index = this.retiredAddresses.size() - 1; index >= 0; index--) {
+            long retired = this.retiredAddresses.get(index);
+            try {
+                this.gpu.free(retired);
+                this.retiredAddresses.remove(index);
+            } catch (Throwable cleanupFailure) {
+                failure = combine(failure, cleanupFailure);
+            }
+        }
         if (failure != null) throw propagate(failure);
     }
 
@@ -111,10 +122,14 @@ public final class AttentionKvState implements AutoCloseable {
                 }
             }
         } catch (RuntimeException | Error copyFailure) {
-            try {
-                this.gpu.free(newAddress);
-            } catch (Throwable cleanupFailure) {
-                copyFailure.addSuppressed(cleanupFailure);
+            if (this.gpu.asynchronous()) {
+                this.retiredAddresses.add(newAddress);
+            } else {
+                try {
+                    this.gpu.free(newAddress);
+                } catch (Throwable cleanupFailure) {
+                    copyFailure.addSuppressed(cleanupFailure);
+                }
             }
             throw copyFailure;
         }
@@ -123,6 +138,10 @@ public final class AttentionKvState implements AutoCloseable {
         this.address = newAddress;
         this.capacity = newCapacity;
         if (oldAddress != 0) {
+            if (this.gpu.asynchronous()) {
+                this.retiredAddresses.add(oldAddress);
+                return;
+            }
             try {
                 this.gpu.free(oldAddress);
             } catch (RuntimeException | Error freeFailure) {

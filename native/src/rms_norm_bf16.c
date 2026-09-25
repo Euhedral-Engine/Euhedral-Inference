@@ -44,8 +44,9 @@ static int rms_norm_bf16_with_offset(const void* input, const void* weight, void
     CUdeviceptr output_ptr = (CUdeviceptr)(uintptr_t)output;
     unsigned int rows_arg = rows, width_arg = width;
     void* params[] = {&input_ptr, &weight_ptr, &output_ptr, &rows_arg, &width_arg, &epsilon, &weight_offset};
-    CUresult status = cuLaunchKernel(function, rows, 1, 1, 128, 1, 1, 0, NULL, params, NULL);
+    CUresult status = cuLaunchKernel(function, rows, 1, 1, 128, 1, 1, 0, euhedral_cuda_submission_stream(), params, NULL);
     if (status != CUDA_SUCCESS) return (int)status;
+    if (euhedral_cuda_submission_stream() != NULL) return EUHEDRAL_CUDA_SUCCESS;
     cudaError_t sync = cudaDeviceSynchronize();
     return sync == cudaSuccess ? EUHEDRAL_CUDA_SUCCESS : (int)sync;
 }

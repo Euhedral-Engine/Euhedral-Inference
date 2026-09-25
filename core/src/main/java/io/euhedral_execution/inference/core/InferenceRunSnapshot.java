@@ -45,13 +45,18 @@ public record InferenceRunSnapshot(
         }
     }
 
-    public record Tuning(List<Integer> workerProcessorIds, int prefillChunkTokens) {
+    public record Tuning(List<Integer> workerProcessorIds, int prefillChunkTokens, GpuExecutionMode gpuExecutionMode) {
         public Tuning {
             workerProcessorIds = List.copyOf(workerProcessorIds);
+            gpuExecutionMode = gpuExecutionMode == null ? GpuExecutionMode.SYNC : gpuExecutionMode;
+        }
+
+        public Tuning(List<Integer> workerProcessorIds, int prefillChunkTokens) {
+            this(workerProcessorIds, prefillChunkTokens, GpuExecutionMode.SYNC);
         }
 
         public static Tuning of(InferenceTuning tuning) {
-            return new Tuning(ids(tuning.workerProcessorIds()), tuning.prefillChunkTokens());
+            return new Tuning(ids(tuning.workerProcessorIds()), tuning.prefillChunkTokens(), tuning.gpuExecutionMode());
         }
     }
 

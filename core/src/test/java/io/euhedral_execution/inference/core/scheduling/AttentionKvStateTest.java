@@ -41,6 +41,22 @@ class AttentionKvStateTest {
     }
 
     @Test
+    void asynchronousGrowthRetainsOldCacheUntilAppendCompletion() {
+        RecordingGpu gpu = new RecordingGpu(true);
+        AttentionKvState state = new AttentionKvState(gpu, 4);
+        state.prepareAppend(0, 3);
+        long original = state.keyCacheAddress();
+        state.commitAppend(3);
+
+        state.prepareAppend(3, 2);
+        assertTrue(state.keyCacheAddress() != original);
+        assertTrue(gpu.frees.isEmpty(), "queued copies must retain the source allocation");
+        state.commitAppend(2);
+        assertEquals(List.of(original), gpu.frees);
+        state.close();
+    }
+
+    @Test
     void rejectsGapsAndDoesNotAdvanceLengthBeforeAppendCommit() {
         RecordingGpu gpu = new RecordingGpu();
         AttentionKvState state = new AttentionKvState(gpu, 4);
@@ -55,9 +71,23 @@ class AttentionKvStateTest {
     }
 
     private static final class RecordingGpu extends ExecutionGpu {
+        private final boolean asynchronous;
         private final AtomicLong nextAddress = new AtomicLong(1000);
         private final List<Long> copySizes = new ArrayList<>();
         private final List<Long> frees = new ArrayList<>();
+
+        private RecordingGpu() {
+            this(false);
+        }
+
+        private RecordingGpu(boolean asynchronous) {
+            this.asynchronous = asynchronous;
+        }
+
+        @Override
+        public boolean asynchronous() {
+            return asynchronous;
+        }
 
         @Override
         public long allocate(long byteSize) {

@@ -24,6 +24,7 @@ subprojects {
         }
         tasks.named<Test>("test") {
             exclude("**/CudaGpuMemoryIntegrationTest.class")
+            exclude("**/CudaAsyncCompletionIntegrationTest.class")
             exclude("**/QwenCompactCudaResidencyIntegrationTest.class")
             exclude("**/QwenEmbeddingCudaIntegrationTest.class")
             exclude("**/CudaGpuOperationsIntegrationTest.class")
@@ -35,6 +36,7 @@ subprojects {
             exclude("**/QwenFullModelCudaIntegrationTest.class")
             exclude("**/QwenGenerationSessionCudaIntegrationTest.class")
             exclude("**/InferenceEngineCudaIntegrationTest.class")
+            exclude("**/AsyncInferenceEngineCudaIntegrationTest.class")
             exclude("**/ChatCompletionsCudaIntegrationTest.class")
             useJUnitPlatform()
         }
@@ -46,6 +48,7 @@ subprojects {
             testClassesDirs = testSourceSet.output.classesDirs
             classpath = testSourceSet.runtimeClasspath
             include("**/CudaGpuMemoryIntegrationTest.class")
+            include("**/CudaAsyncCompletionIntegrationTest.class")
             include("**/QwenCompactCudaResidencyIntegrationTest.class")
             include("**/QwenEmbeddingCudaIntegrationTest.class")
             include("**/CudaGpuOperationsIntegrationTest.class")
@@ -57,6 +60,7 @@ subprojects {
             include("**/QwenFullModelCudaIntegrationTest.class")
             include("**/QwenGenerationSessionCudaIntegrationTest.class")
             include("**/InferenceEngineCudaIntegrationTest.class")
+            include("**/AsyncInferenceEngineCudaIntegrationTest.class")
             include("**/ChatCompletionsCudaIntegrationTest.class")
             systemProperty(
                     "euhedral.cuda.library",

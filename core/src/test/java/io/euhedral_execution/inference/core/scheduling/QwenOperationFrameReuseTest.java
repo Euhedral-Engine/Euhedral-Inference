@@ -7,6 +7,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.euhedral_execution.core.frames.AbstractFrame;
+import io.euhedral_execution.core.generics.LatticeReceiver;
+import io.euhedral_execution.core.generics.LatticeSource;
+import io.euhedral_execution.core.impl.DefaultExecutor;
 import io.euhedral_execution.inference.core.scheduling.frames.QwenInstructionFrame;
 import java.util.ArrayList;
 import java.util.List;
@@ -16,9 +19,62 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 
 class QwenOperationFrameReuseTest {
+    @Test
+    void submissionErrorStillTerminatesTheRequestAtTheRealExecutorBoundary() {
+        var plan = new QwenExecutionPlan(QwenExecutionFixtures.weights());
+        var gpu = new ErrorAfterSubmissionGpu();
+        var runner = new QwenExecutionRunner(plan, gpu);
+        var context = context(plan, 507);
+        runner.submit(context);
+        AbstractFrame frame = pullOne(runner);
+        var receiver = new AtomicReference<LatticeReceiver>();
+        new DefaultExecutor().input(new LatticeSource() {
+            @Override
+            public void addDownstream(LatticeReceiver downstream) {
+                receiver.set(downstream);
+            }
+
+            @Override
+            public long pull(Consumer<AbstractFrame> consumer, Function<AbstractFrame, Boolean> stop, long requested) {
+                return 0;
+            }
+
+            @Override
+            public void request(long requested) {}
+
+            @Override
+            public void complete() {}
+
+            @Override
+            public boolean isComplete() {
+                return false;
+            }
+        });
+
+        assertThrows(OutOfMemoryError.class, () -> receiver.get().push(frame));
+        assertTrue(context.outcome().isDone(), "an Error must not strand the runner outside the executor catch");
+        assertEquals(
+                QwenExecutionContext.Status.FAILED, context.outcome().join().status());
+        runner.completeGracefully();
+        assertTrue(runner.isComplete());
+    }
+
+    private static final class ErrorAfterSubmissionGpu extends QwenExecutionFixtures.RecordingGpu {
+        @Override
+        public boolean asynchronous() {
+            return true;
+        }
+
+        @Override
+        public void submit(Runnable operation) {
+            operation.run();
+            throw new OutOfMemoryError("injected post-launch host exhaustion");
+        }
+    }
 
     @Test
     void concreteOperationFramesHaveDedicatedTypesAndAreRecycled() {
@@ -80,6 +136,192 @@ class QwenOperationFrameReuseTest {
         assertEquals(
                 QwenExecutionContext.Status.SUCCESS, second.outcome().join().status());
         runner.completeGracefully();
+    }
+
+    @Test
+    void deferredRegistrationFailureDrainsGpuAndFinalizesTheOwningFrame() {
+        var plan = new QwenExecutionPlan(QwenExecutionFixtures.weights());
+        var gpu = new FailingDeferredGpu();
+        var runner = new QwenExecutionRunner(plan, gpu);
+        var first = context(plan, 501);
+        runner.submit(first);
+        AbstractFrame frame = pullOne(runner);
+
+        frame.execute();
+        frame.doFinally();
+
+        assertEquals(1, gpu.synchronizations);
+        assertEquals(QwenExecutionContext.Status.FAILED, first.outcome().join().status());
+        var second = context(plan, 502);
+        runner.submit(second);
+        AbstractFrame reused = pullOne(runner);
+        assertSame(frame, reused, "failure must recycle the old frame exactly once");
+        reused.execute();
+        reused.doFinally();
+        assertEquals(QwenExecutionContext.Status.FAILED, second.outcome().join().status());
+        runner.completeGracefully();
+    }
+
+    private static final class FailingDeferredGpu extends QwenExecutionFixtures.RecordingGpu {
+        @Override
+        public boolean asynchronous() {
+            return true;
+        }
+
+        @Override
+        public void deferCompletion(Runnable completed, Consumer<Throwable> failed) {
+            throw new IllegalStateException("injected event registration failure");
+        }
+    }
+
+    @Test
+    void embeddingUploadLivesUntilAsyncCompletionFinalizesTheFrame() {
+        var plan = new QwenExecutionPlan(QwenExecutionFixtures.weights());
+        var gpu = new DeferredUploadGpu();
+        var runner = new QwenExecutionRunner(plan, gpu);
+        var context = context(plan, 506);
+        runner.submit(context);
+        AbstractFrame frame = pullOne(runner);
+        frame.execute();
+        frame.doFinally();
+
+        assertEquals(1, gpu.uploads);
+        assertEquals(0, gpu.releases);
+        assertTrue(!context.outcome().isDone());
+        gpu.completed.run();
+        assertEquals(1, gpu.releases);
+        assertEquals(
+                QwenExecutionContext.Status.SUCCESS, context.outcome().join().status());
+        runner.completeGracefully();
+    }
+
+    private static final class DeferredUploadGpu extends QwenExecutionFixtures.RecordingGpu {
+        int uploads;
+        int releases;
+        Runnable completed;
+
+        @Override
+        public boolean asynchronous() {
+            return true;
+        }
+
+        @Override
+        public UploadBuffer allocateUploadBuffer(long bytes) {
+            uploads++;
+            UploadBuffer allocated = super.allocateUploadBuffer(bytes);
+            return new UploadBuffer(allocated.segment(), () -> {
+                releases++;
+                allocated.close();
+            });
+        }
+
+        @Override
+        public void deferCompletion(Runnable completed, Consumer<Throwable> failed) {
+            this.completed = completed;
+        }
+    }
+
+    @Test
+    void failedRecoveryPoisonsGpuAndNeverReleasesUnprovenBuffers() {
+        var plan = new QwenExecutionPlan(QwenExecutionFixtures.weights());
+        var gpu = new UnrecoverableGpu();
+        var runner = new QwenExecutionRunner(plan, gpu);
+        var context = context(plan, 503);
+        runner.submit(context);
+        AbstractFrame frame = pullOne(runner);
+        RuntimeException failure = assertThrows(RuntimeException.class, frame::execute);
+        frame.doFinallyWithError(failure);
+
+        assertEquals(
+                QwenExecutionContext.Status.FAILED, context.outcome().join().status());
+        assertTrue(gpu.poisoned);
+        assertEquals(0, gpu.nativeFrees, "uncertain GPU work may still use every submitted buffer");
+        assertEquals(0, gpu.hostReleases, "uncertain DMA may still read the pinned upload");
+        assertThrows(IllegalStateException.class, () -> runner.submit(context(plan, 504)));
+        runner.completeGracefully();
+    }
+
+    @Test
+    void failedDeferredRegistrationAndRecoveryFailsTheRequestWithoutReleasingBuffers() {
+        var plan = new QwenExecutionPlan(QwenExecutionFixtures.weights());
+        var gpu = new UnrecoverableRegistrationGpu();
+        var runner = new QwenExecutionRunner(plan, gpu);
+        var context = context(plan, 505);
+        runner.submit(context);
+        AbstractFrame frame = pullOne(runner);
+        frame.execute();
+        frame.doFinally();
+
+        assertTrue(gpu.poisoned);
+        assertEquals(
+                QwenExecutionContext.Status.FAILED, context.outcome().join().status());
+        assertEquals(0, gpu.nativeFrees);
+        runner.completeGracefully();
+    }
+
+    private static class UnrecoverableGpu extends QwenExecutionFixtures.RecordingGpu {
+        protected boolean poisoned;
+        protected int nativeFrees;
+        protected int hostReleases;
+
+        @Override
+        public boolean asynchronous() {
+            return true;
+        }
+
+        @Override
+        public void submit(Runnable operation) {
+            operation.run();
+            throw new IllegalStateException("post-launch host error");
+        }
+
+        @Override
+        public void synchronize() {
+            throw new IllegalStateException("recovery failed");
+        }
+
+        @Override
+        public void free(long address) {
+            if (poisoned) throw new IllegalStateException("poisoned GPU retains the allocation");
+            nativeFrees++;
+            super.free(address);
+        }
+
+        @Override
+        public UploadBuffer allocateUploadBuffer(long bytes) {
+            UploadBuffer allocated = super.allocateUploadBuffer(bytes);
+            return new UploadBuffer(allocated.segment(), () -> {
+                hostReleases++;
+                allocated.close();
+            });
+        }
+
+        @Override
+        public boolean completionProven() {
+            return !poisoned;
+        }
+
+        @Override
+        public void poison(Throwable failure) {
+            poisoned = true;
+        }
+
+        @Override
+        public void ensureHealthy() {
+            if (poisoned) throw new IllegalStateException("GPU engine is poisoned");
+        }
+    }
+
+    private static final class UnrecoverableRegistrationGpu extends UnrecoverableGpu {
+        @Override
+        public void submit(Runnable operation) {
+            operation.run();
+        }
+
+        @Override
+        public void deferCompletion(Runnable completed, Consumer<Throwable> failed) {
+            throw new IllegalStateException("injected event registration failure");
+        }
     }
 
     @Test

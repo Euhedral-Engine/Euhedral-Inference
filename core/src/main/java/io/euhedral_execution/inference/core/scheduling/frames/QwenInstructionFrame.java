@@ -44,6 +44,8 @@ public abstract class QwenInstructionFrame extends AbstractFrame {
 
     protected void releaseTemporary(QwenExecutionContext context) {}
 
+    protected void gpuCompleted() {}
+
     /// Clears an instruction frame that could not be published to Euhedral.
     public final void abandonBeforePublication() {
         this.context = null;
@@ -62,18 +64,59 @@ public abstract class QwenInstructionFrame extends AbstractFrame {
         if (current.hasFailureOrCancellation()) {
             return;
         }
-        perform(current, this.instruction);
-        this.gpu.synchronize();
+        try {
+            this.gpu.submit(() -> perform(current, this.instruction));
+        } catch (RuntimeException | Error failure) {
+            // A launch or post-launch host operation may fail after earlier work was submitted.
+            // Error recovery must drain the device before Euhedral releases this frame's buffers.
+            if (this.gpu.asynchronous()) {
+                try {
+                    this.gpu.synchronize();
+                } catch (RuntimeException | Error synchronizationFailure) {
+                    failure.addSuppressed(synchronizationFailure);
+                    this.gpu.poison(failure);
+                }
+            }
+            if (failure instanceof Error fatal) {
+                // Euhedral's executor catches Exception, not Error. Finalize while this
+                // worker still owns the frame, then allow the fatal error to escape.
+                try {
+                    finish(fatal);
+                } catch (Throwable cleanupFailure) {
+                    if (cleanupFailure != fatal) fatal.addSuppressed(cleanupFailure);
+                }
+            }
+            throw failure;
+        }
+        if (!this.gpu.asynchronous()) this.gpu.synchronize();
         this.completed = true;
     }
 
     @Override
     public final void doFinally() {
-        finish(this.completed ? null : this.context.failure());
+        if (this.completed && this.gpu.asynchronous()) {
+            try {
+                this.gpu.deferCompletion(() -> finish(null), failure -> finish(failure));
+            } catch (RuntimeException | Error registrationFailure) {
+                // Registration may fail after a launch. Prove device completion before
+                // releasing the frame, workspace, and sequence ownership.
+                try {
+                    this.gpu.synchronize();
+                } catch (RuntimeException | Error synchronizationFailure) {
+                    registrationFailure.addSuppressed(synchronizationFailure);
+                    this.gpu.poison(registrationFailure);
+                }
+                finish(registrationFailure);
+            }
+        } else {
+            finish(this.completed ? null : this.context.failure());
+        }
     }
 
     @Override
     public final void doFinallyWithError(Throwable error) {
+        // This path also handles errors thrown before the frame body ran. A failed native
+        // submission is drained by execute() before this finalizer may recycle the frame.
         finish(Objects.requireNonNull(error, "error"));
     }
 
@@ -81,6 +124,7 @@ public abstract class QwenInstructionFrame extends AbstractFrame {
         QwenExecutionContext current = this.context;
         QwenExecutionPlan.Instruction completedInstruction = this.instruction;
         try {
+            if (error == null) gpuCompleted();
             releaseTemporary(current);
         } catch (RuntimeException | Error cleanupFailure) {
             if (error == null) {

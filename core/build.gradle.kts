@@ -17,6 +17,12 @@ dependencies {
     testRuntimeOnly(libs.junit.platform.launcher)
 }
 
+tasks.named<Test>("test") {
+    providers.gradleProperty("euhedral.cuda.async.library").orNull?.let {
+        systemProperty("euhedral.cuda.async.library", it)
+    }
+}
+
 val tokenizerReferenceDirectory = providers.gradleProperty("euhedral.qwen.tokenizer-dir")
     .orElse("/mnt/shared/qwen38-quant/source/qwen")
 

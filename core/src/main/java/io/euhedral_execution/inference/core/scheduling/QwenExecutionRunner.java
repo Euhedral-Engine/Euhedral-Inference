@@ -47,6 +47,7 @@ public final class QwenExecutionRunner implements LatticeSource {
         if (context.plan() != plan) {
             throw new IllegalArgumentException("quantum belongs to another execution plan");
         }
+        gpu.ensureHealthy();
         while (true) {
             int count = active.get();
             if (count < 0) throw new IllegalStateException("Qwen runner admission is closed");
@@ -54,8 +55,21 @@ public final class QwenExecutionRunner implements LatticeSource {
             if (active.compareAndSet(count, count + 1)) break;
         }
         try {
-            context.begin(gpu);
+            gpu.prepare(() -> context.begin(gpu));
         } catch (RuntimeException | Error failure) {
+            if (!(failure instanceof QwenExecutionContext.DuplicateAdmissionException)
+                    && !context.completion().isDone()) {
+                if (gpu.asynchronous()) {
+                    try {
+                        gpu.synchronize();
+                    } catch (RuntimeException | Error synchronizationFailure) {
+                        failure.addSuppressed(synchronizationFailure);
+                        gpu.poison(failure);
+                    }
+                }
+                context.fail(failure);
+                context.finish(null, gpu);
+            }
             if (active.decrementAndGet() == Integer.MIN_VALUE) signalComplete();
             throw failure;
         }

@@ -46,7 +46,7 @@ class InferenceRunSnapshotTest {
     @Test
     void serializesAStableJsonContract() {
         String expected = "{\"schemaVersion\":1,"
-                + "\"tuning\":{\"workerProcessorIds\":[0,1,8,9],\"prefillChunkTokens\":256},"
+                + "\"tuning\":{\"workerProcessorIds\":[0,1,8,9],\"prefillChunkTokens\":256,\"gpuExecutionMode\":\"SYNC\"},"
                 + "\"workerCoreIds\":[0,1],"
                 + "\"model\":{\"artifactPath\":\"/models/model.edrl\",\"artifactBytes\":12859040768,"
                 + "\"artifactFormatVersion\":2,\"dimensions\":{\"vocabSize\":248320,\"hiddenSize\":5120,"

@@ -1,14 +1,79 @@
 package io.euhedral_execution.inference.core.gpu;
 
+import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
+import java.util.Objects;
+import java.util.function.Consumer;
 
-/// Synchronous GPU operations used by the current Qwen instruction slice.
+/// GPU operations and their explicit completion boundary for Qwen instructions.
 public abstract class ExecutionGpu implements GpuMemory {
+
+    /// Host memory owned by one instruction until its GPU completion is proven.
+    public record UploadBuffer(MemorySegment segment, Runnable release) implements AutoCloseable {
+        public UploadBuffer {
+            Objects.requireNonNull(segment, "segment");
+            Objects.requireNonNull(release, "release");
+        }
+
+        @Override
+        public void close() {
+            release.run();
+        }
+    }
+
+    public UploadBuffer allocateUploadBuffer(long bytes) {
+        Arena arena = Arena.ofShared();
+        try {
+            return new UploadBuffer(arena.allocate(bytes, Integer.BYTES), arena::close);
+        } catch (RuntimeException | Error failure) {
+            arena.close();
+            throw failure;
+        }
+    }
+
+    public void copyUploadToDevice(long destination, UploadBuffer upload) {
+        copyHostToDevice(destination, upload.segment(), upload.segment().byteSize());
+    }
+
+    public boolean completionProven() {
+        return true;
+    }
+
+    public boolean asynchronous() {
+        return false;
+    }
+
+    /// Runs one instruction's submission in the GPU's selected execution mode.
+    public void submit(Runnable operation) {
+        operation.run();
+    }
+
+    /// Initializes sequence state on the same stream as later async instructions.
+    public void prepare(Runnable initialization) {
+        initialization.run();
+    }
+
+    public void deferCompletion(Runnable completed, Consumer<Throwable> failed) {
+        throw new UnsupportedOperationException("asynchronous GPU completion is not enabled");
+    }
+
+    /// Binds completed GPU work to a lattice-owned frame source before async submissions begin.
+    public void bindCompletionSink(Consumer<Runnable> completionFrames) {
+        throw new UnsupportedOperationException("asynchronous GPU completion is not enabled");
+    }
+
+    /// Permanently retains uncertain GPU ownership after failed recovery.
+    public void poison(Throwable failure) {
+        throw new UnsupportedOperationException("this GPU does not support asynchronous recovery");
+    }
+
+    /// Rejects new work after an unprovable GPU failure.
+    public void ensureHealthy() {}
 
     protected static final FunctionDescriptor MALLOC =
             FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.JAVA_LONG);

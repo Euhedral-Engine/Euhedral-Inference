@@ -14,6 +14,9 @@ import io.euhedral_execution.inference.core.scheduling.QwenWorkGenerator;
 /// Executes one stateful or elementwise GPU instruction using its immutable buffer operands.
 public final class QwenGpuOperationFrame extends QwenInstructionFrame {
 
+    private AttentionKvState pendingAppendState;
+    private int pendingAppendTokens;
+
     public QwenGpuOperationFrame(
             long idHash,
             FrameManager<QwenExecutionContext, QwenGpuOperationFrame> recycler,
@@ -134,7 +137,26 @@ public final class QwenGpuOperationFrame extends QwenInstructionFrame {
                         queryWidth,
                         keyValueWidth,
                         context.startPosition());
-        state.commitAppend(context.inputTokenCount());
+        this.pendingAppendState = state;
+        this.pendingAppendTokens = context.inputTokenCount();
+    }
+
+    @Override
+    protected void gpuCompleted() {
+        if (this.pendingAppendState != null) {
+            try {
+                this.pendingAppendState.commitAppend(this.pendingAppendTokens);
+            } finally {
+                this.pendingAppendState = null;
+                this.pendingAppendTokens = 0;
+            }
+        }
+    }
+
+    @Override
+    protected void releaseTemporary(QwenExecutionContext context) {
+        this.pendingAppendState = null;
+        this.pendingAppendTokens = 0;
     }
 
     private void runAttentionCausal(QwenExecutionContext context, QwenExecutionPlan.Instruction instruction) {

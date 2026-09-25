@@ -1,13 +1,24 @@
 package io.euhedral_execution.inference.core.gpu;
 
+import io.euhedral_execution.data_structures.queues.MpmcQueue;
 import java.lang.foreign.Arena;
+import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.nio.file.Path;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /// FFM binding for the stable Euhedral CUDA C ABI.
 ///
@@ -15,15 +26,37 @@ import java.util.Objects;
 /// inside the native calls and are never exposed as dereferenceable Java memory.
 public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
 
+    private static final Logger LOG = Logger.getLogger(CudaGpuMemory.class.getName());
+    private static final int MAX_CACHED_EVENTS = 256;
     private final Arena arena;
     private final MethodHandle malloc;
     private final MethodHandle free;
+    private final MethodHandle hostMalloc;
+    private final MethodHandle hostFree;
     private final MethodHandle deviceMemoryInfo;
     private final MethodHandle copyHostToDevice;
+    private final MethodHandle copyUploadToDevice;
     private final MethodHandle copyDeviceToHost;
     private final MethodHandle copyDeviceToDevice;
     private final MethodHandle embedQ3;
     private final MethodHandle synchronize;
+    private final MethodHandle streamCreate;
+    private final MethodHandle streamDestroy;
+    private final MethodHandle streamSelect;
+    private final MethodHandle streamClear;
+    private final MethodHandle eventCreate;
+    private final MethodHandle eventRecord;
+    private final MethodHandle eventQuery;
+    private final MethodHandle eventDestroy;
+    private final MethodHandle completionNotify;
+    private final MemorySegment completionCallback;
+    private final boolean asynchronous;
+    private final long stream;
+    private final ConcurrentHashMap<Long, Completion> completions = new ConcurrentHashMap<>();
+    private final AtomicLong nextCompletion = new AtomicLong();
+    private final AtomicReference<Throwable> poisoned = new AtomicReference<>();
+    private final MpmcQueue<Long> availableEvents = new MpmcQueue<>(64, 4);
+    private volatile Consumer<Runnable> completionSink;
     private final MethodHandle rmsNormBf16;
     private final MethodHandle rmsNormUnitOffsetBf16;
     private final MethodHandle linearQ3Bf16;
@@ -39,9 +72,13 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
     private final MethodHandle attentionQkNormRopeBf16;
     private final MethodHandle attentionKvAppendBf16;
     private final MethodHandle attentionCausalBf16;
-    private boolean closed;
+    private volatile boolean closed;
 
     public CudaGpuMemory(Path libraryPath) {
+        this(libraryPath, false);
+    }
+
+    public CudaGpuMemory(Path libraryPath, boolean asynchronous) {
         Objects.requireNonNull(libraryPath, "libraryPath");
         Arena loadedLibraryArena = Arena.ofShared();
         try {
@@ -50,12 +87,87 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
             this.arena = loadedLibraryArena;
             this.malloc = bind(linker, symbols, "euhedral_cuda_malloc", MALLOC);
             this.free = bind(linker, symbols, "euhedral_cuda_free", FREE);
+            this.hostMalloc = asynchronous ? bind(linker, symbols, "euhedral_cuda_host_malloc", MALLOC) : null;
+            this.hostFree = asynchronous ? bind(linker, symbols, "euhedral_cuda_host_free", FREE) : null;
             this.deviceMemoryInfo = bind(linker, symbols, "euhedral_cuda_device_memory_info", DEVICE_MEMORY_INFO);
             this.copyHostToDevice = bind(linker, symbols, "euhedral_cuda_copy_host_to_device", COPY);
+            this.copyUploadToDevice =
+                    asynchronous ? bind(linker, symbols, "euhedral_cuda_copy_upload_to_device", COPY) : null;
             this.copyDeviceToHost = bind(linker, symbols, "euhedral_cuda_copy_device_to_host", COPY);
             this.copyDeviceToDevice = bind(linker, symbols, "euhedral_cuda_copy_device_to_device", COPY);
             this.embedQ3 = bind(linker, symbols, "euhedral_cuda_embed_q3", EMBED_Q3);
             this.synchronize = bind(linker, symbols, "euhedral_cuda_synchronize", SYNCHRONIZE);
+            this.streamCreate = asynchronous
+                    ? bind(linker, symbols, "euhedral_cuda_stream_create", FunctionDescriptor.of(ValueLayout.JAVA_LONG))
+                    : null;
+            this.streamDestroy = asynchronous
+                    ? bind(
+                            linker,
+                            symbols,
+                            "euhedral_cuda_stream_destroy",
+                            FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG))
+                    : null;
+            this.streamSelect = asynchronous
+                    ? bind(
+                            linker,
+                            symbols,
+                            "euhedral_cuda_stream_select",
+                            FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG))
+                    : null;
+            this.streamClear = asynchronous
+                    ? bind(linker, symbols, "euhedral_cuda_stream_clear", FunctionDescriptor.ofVoid())
+                    : null;
+            this.eventCreate = asynchronous
+                    ? bind(
+                            linker,
+                            symbols,
+                            "euhedral_cuda_completion_event_create",
+                            FunctionDescriptor.of(ValueLayout.JAVA_LONG))
+                    : null;
+            this.eventRecord = asynchronous
+                    ? bind(
+                            linker,
+                            symbols,
+                            "euhedral_cuda_completion_event_record",
+                            FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG))
+                    : null;
+            this.eventQuery = asynchronous
+                    ? bind(
+                            linker,
+                            symbols,
+                            "euhedral_cuda_completion_event_query",
+                            FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG))
+                    : null;
+            this.eventDestroy = asynchronous
+                    ? bind(
+                            linker,
+                            symbols,
+                            "euhedral_cuda_completion_event_destroy",
+                            FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG))
+                    : null;
+            this.completionNotify = asynchronous
+                    ? bind(
+                            linker,
+                            symbols,
+                            "euhedral_cuda_completion_notify",
+                            FunctionDescriptor.of(
+                                    ValueLayout.JAVA_INT,
+                                    ValueLayout.JAVA_LONG,
+                                    ValueLayout.ADDRESS,
+                                    ValueLayout.JAVA_LONG))
+                    : null;
+            this.completionCallback = asynchronous
+                    ? linker.upcallStub(
+                            MethodHandles.lookup()
+                                    .findVirtual(
+                                            CudaGpuMemory.class,
+                                            "nativeCompletion",
+                                            MethodType.methodType(void.class, long.class, int.class))
+                                    .bindTo(this),
+                            FunctionDescriptor.ofVoid(ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT),
+                            loadedLibraryArena)
+                    : MemorySegment.NULL;
+            this.asynchronous = asynchronous;
             this.rmsNormBf16 = bind(linker, symbols, "euhedral_cuda_rms_norm_bf16", RMS_NORM_BF16);
             this.rmsNormUnitOffsetBf16 =
                     bind(linker, symbols, "euhedral_cuda_rms_norm_unit_offset_bf16", RMS_NORM_UNIT_OFFSET_BF16);
@@ -77,11 +189,194 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
                     bind(linker, symbols, "euhedral_cuda_attention_kv_append_bf16", ATTENTION_KV_APPEND_BF16);
             this.attentionCausalBf16 =
                     bind(linker, symbols, "euhedral_cuda_attention_causal_bf16", ATTENTION_CAUSAL_BF16);
+            this.stream = asynchronous ? (long) this.streamCreate.invokeExact() : 0L;
+            if (asynchronous && this.stream == 0L) throw new GpuMemoryException("CUDA stream creation failed");
         } catch (RuntimeException exception) {
             loadedLibraryArena.close();
             throw exception;
+        } catch (Throwable exception) {
+            loadedLibraryArena.close();
+            throw new GpuMemoryException("CUDA stream initialization failed", exception);
         }
     }
+
+    @Override
+    public boolean asynchronous() {
+        return this.asynchronous;
+    }
+
+    @Override
+    public void poison(Throwable failure) {
+        Objects.requireNonNull(failure, "failure");
+        if (poisoned.compareAndSet(null, failure)) {
+            LOG.log(Level.SEVERE, "CUDA recovery failed; retaining GPU allocations until process restart", failure);
+        }
+        Throwable cause = poisoned.get();
+        for (Completion completion : completions.values()) failPoisoned(completion, cause);
+    }
+
+    @Override
+    public void ensureHealthy() {
+        ensureOpen();
+    }
+
+    @Override
+    public void bindCompletionSink(Consumer<Runnable> completionFrames) {
+        if (!asynchronous) throw new IllegalStateException("asynchronous completion is disabled");
+        ensureOpen();
+        if (this.completionSink != null) throw new IllegalStateException("CUDA completion sink already attached");
+        this.completionSink = Objects.requireNonNull(completionFrames, "completionFrames");
+    }
+
+    @Override
+    public void submit(Runnable operation) {
+        ensureOpen();
+        if (!asynchronous) {
+            operation.run();
+            return;
+        }
+        try {
+            int status = (int) streamSelect.invokeExact(stream);
+            if (status != 0) throw new GpuMemoryException("CUDA submission stream selection", status);
+            try {
+                operation.run();
+            } finally {
+                streamClear.invokeExact();
+            }
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new GpuMemoryException("CUDA submission stream invocation failed", failure);
+        }
+    }
+
+    @Override
+    public void prepare(Runnable initialization) {
+        submit(initialization);
+    }
+
+    @Override
+    public void deferCompletion(Runnable completed, Consumer<Throwable> failed) {
+        ensureOpen();
+        if (!asynchronous) throw new IllegalStateException("asynchronous completion is disabled");
+        if (completionSink == null) throw new IllegalStateException("CUDA completion sink is not attached");
+        long event = 0;
+        long token = 0;
+        try {
+            Long cached = availableEvents.poll();
+            event = cached == null ? (long) eventCreate.invokeExact() : cached;
+            if (event == 0) throw new GpuMemoryException("CUDA event creation returned null");
+            int status = (int) eventRecord.invokeExact(event, stream);
+            if (status != 0) throw new GpuMemoryException("CUDA event record", status);
+            token = nextCompletion.incrementAndGet();
+            if (token <= 0) throw new IllegalStateException("CUDA completion identifiers exhausted");
+            completions.put(token, new Completion(event, completed, failed, new AtomicBoolean()));
+            ensureHealthy();
+            status = (int) completionNotify.invokeExact(stream, completionCallback, token);
+            if (status != 0) throw new GpuMemoryException("CUDA completion notification", status);
+        } catch (Throwable failure) {
+            // Failed event registration cannot prove that a previously launched kernel stopped.
+            // This explicit error-recovery barrier precedes workspace/frame cleanup.
+            try {
+                synchronize();
+            } catch (RuntimeException | Error synchronizationFailure) {
+                failure.addSuppressed(synchronizationFailure);
+                poison(failure);
+                Completion retained = token == 0 ? null : completions.get(token);
+                if (retained == null) notifyFailed(failed, failure);
+                else failPoisoned(retained, failure);
+                return;
+            }
+            if (token != 0) completions.remove(token);
+            if (event != 0) destroyEvent(event);
+            notifyFailed(failed, failure);
+        }
+    }
+
+    /// CUDA's host callback only publishes a ready frame; it never calls CUDA or finalizes ownership.
+    private void nativeCompletion(long token, int status) {
+        if (poisoned.get() != null) return;
+        try {
+            if (!completions.containsKey(token)) return;
+            completionSink.accept(() -> finishCompletion(token, status));
+        } catch (Throwable failure) {
+            // CUDA host callbacks must not block on finalization or call CUDA. One-shot failure
+            // propagation happens off the callback thread and never releases unproven buffers.
+            try {
+                Thread.ofVirtual().name("euhedral-cuda-failed-publication").start(() -> poison(failure));
+            } catch (Throwable threadFailure) {
+                failure.addSuppressed(threadFailure);
+                poison(failure);
+            }
+        }
+    }
+
+    private void finishCompletion(long token, int callbackStatus) {
+        Completion completion = completions.get(token);
+        if (completion == null) return;
+        if (poisoned.get() != null || completion.finalized().get()) return;
+        if (callbackStatus != 0) {
+            completeFailed(token, completion, new GpuMemoryException("CUDA asynchronous stream", callbackStatus));
+            return;
+        }
+        int status;
+        try {
+            status = (int) eventQuery.invokeExact(completion.event());
+        } catch (Throwable failure) {
+            completeFailed(token, completion, failure);
+            return;
+        }
+        if (status != 0) {
+            completeFailed(token, completion, new GpuMemoryException("CUDA completion event", status));
+            return;
+        }
+        if (!completion.finalized().compareAndSet(false, true)) return;
+        completions.remove(token);
+        if (availableEvents.size() < MAX_CACHED_EVENTS) availableEvents.offer(completion.event());
+        else destroyEvent(completion.event());
+        try {
+            completion.completed().run();
+        } catch (Throwable failure) {
+            LOG.log(Level.SEVERE, "CUDA completion callback failed after event completion", failure);
+        }
+    }
+
+    private void completeFailed(long token, Completion completion, Throwable failure) {
+        try {
+            synchronize();
+        } catch (RuntimeException | Error synchronizationFailure) {
+            failure.addSuppressed(synchronizationFailure);
+            poison(failure);
+            return;
+        }
+        if (!completion.finalized().compareAndSet(false, true)) return;
+        completions.remove(token);
+        destroyEvent(completion.event());
+        notifyFailed(completion.failed(), failure);
+    }
+
+    private void failPoisoned(Completion completion, Throwable failure) {
+        if (completion.finalized().compareAndSet(false, true)) notifyFailed(completion.failed(), failure);
+    }
+
+    private void notifyFailed(Consumer<Throwable> failed, Throwable failure) {
+        try {
+            failed.accept(failure);
+        } catch (Throwable callbackFailure) {
+            LOG.log(Level.SEVERE, "CUDA failed-completion callback failed", callbackFailure);
+        }
+    }
+
+    private void destroyEvent(long event) {
+        try {
+            int status = (int) eventDestroy.invokeExact(event);
+            if (status != 0) LOG.log(Level.WARNING, "CUDA event destruction failed with status {0}", status);
+        } catch (Throwable failure) {
+            LOG.log(Level.WARNING, "CUDA event destruction failed", failure);
+        }
+    }
+
+    private record Completion(long event, Runnable completed, Consumer<Throwable> failed, AtomicBoolean finalized) {}
 
     @Override
     public long allocate(long byteSize) {
@@ -96,6 +391,58 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
             throw exception;
         } catch (Throwable throwable) {
             throw new GpuMemoryException("CUDA allocation invocation failed", throwable);
+        }
+    }
+
+    @Override
+    public UploadBuffer allocateUploadBuffer(long byteSize) {
+        if (!asynchronous) return super.allocateUploadBuffer(byteSize);
+        ensureOpen();
+        if (byteSize <= 0) throw new IllegalArgumentException("byteSize must be positive");
+        try {
+            MemorySegment address = (MemorySegment) hostMalloc.invokeExact(byteSize);
+            if (address.address() == 0) throw new GpuMemoryException("CUDA pinned upload allocation returned null");
+            return new UploadBuffer(address.reinterpret(byteSize), () -> freePinnedUpload(address));
+        } catch (GpuMemoryException failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new GpuMemoryException("CUDA pinned upload allocation failed", failure);
+        }
+    }
+
+    @Override
+    public void copyUploadToDevice(long destination, UploadBuffer upload) {
+        if (!asynchronous) {
+            super.copyUploadToDevice(destination, upload);
+            return;
+        }
+        ensureOpen();
+        requireDeviceAddress(destination);
+        Objects.requireNonNull(upload, "upload");
+        MemorySegment source = upload.segment();
+        int status = invokeCopy(
+                copyUploadToDevice,
+                MemorySegment.ofAddress(destination),
+                source,
+                source.byteSize(),
+                "pinned host-to-device copy");
+        if (status != 0) throw new GpuMemoryException("pinned host-to-device copy", status);
+    }
+
+    @Override
+    public boolean completionProven() {
+        return poisoned.get() == null;
+    }
+
+    private void freePinnedUpload(MemorySegment address) {
+        ensureOpen();
+        try {
+            int status = (int) hostFree.invokeExact(address);
+            if (status != 0) throw new GpuMemoryException("CUDA pinned upload free", status);
+        } catch (GpuMemoryException failure) {
+            throw failure;
+        } catch (Throwable failure) {
+            throw new GpuMemoryException("CUDA pinned upload free invocation failed", failure);
         }
     }
 
@@ -668,11 +1015,26 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
     }
 
     @Override
-    public void close() {
-        if (!closed) {
-            closed = true;
-            arena.close();
+    public synchronized void close() {
+        if (closed) return;
+        ensureHealthy();
+        if (asynchronous) {
+            if (!completions.isEmpty()) throw new IllegalStateException("CUDA completion frames did not drain");
+            // A completion frame may run before its native host callback returns. Drain the
+            // stream before releasing the FFM upcall stub or unloading its library arena.
+            synchronize();
+            for (Long event; (event = availableEvents.poll()) != null; ) destroyEvent(event);
+            try {
+                int status = (int) streamDestroy.invokeExact(stream);
+                if (status != 0) throw new GpuMemoryException("CUDA stream destruction", status);
+            } catch (GpuMemoryException failure) {
+                throw failure;
+            } catch (Throwable failure) {
+                throw new GpuMemoryException("CUDA stream destruction invocation failed", failure);
+            }
         }
+        closed = true;
+        arena.close();
     }
 
     private static int invokeCopy(
@@ -707,6 +1069,9 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
     }
 
     private void ensureOpen() {
+        Throwable failure = poisoned.get();
+        if (failure != null)
+            throw new IllegalStateException("CUDA engine is poisoned; GPU ownership is retained", failure);
         if (closed) throw new IllegalStateException("CUDA memory binding is closed");
     }
 

@@ -1,10 +1,22 @@
 LIBRARY cudart64_13.dll
 EXPORTS
     cudaDeviceSynchronize
+    cudaEventCreateWithFlags
+    cudaEventDestroy
+    cudaEventQuery
+    cudaEventRecord
     cudaFree
+    cudaFreeHost
     cudaGetDevice
     cudaMalloc
+    cudaHostAlloc
     cudaMemGetInfo
     cudaMemcpy
+    cudaMemcpyAsync
     cudaMemset
+    cudaMemsetAsync
+    cudaStreamAddCallback
     cudaSetDevice
+    cudaStreamCreateWithFlags
+    cudaStreamDestroy
+    cudaStreamSynchronize

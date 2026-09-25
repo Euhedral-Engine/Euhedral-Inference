@@ -30,6 +30,12 @@ public final class QwenExecutionContext {
 
     public record Outcome(Status status, Throwable failure) {}
 
+    static final class DuplicateAdmissionException extends IllegalStateException {
+        DuplicateAdmissionException() {
+            super("quantum was already submitted");
+        }
+    }
+
     private final QwenExecutionPlan plan;
     private final QwenSequenceState sequence;
     private final ExecutionKind kind;
@@ -173,7 +179,7 @@ public final class QwenExecutionContext {
     /// Package-private hook to deterministically exercise cancellation at the lease-claim boundary.
     void begin(ExecutionGpu gpu, Runnable beforeClaim) {
         if (!this.submitted.compareAndSet(false, true)) {
-            throw new IllegalStateException("quantum was already submitted");
+            throw new DuplicateAdmissionException();
         }
         if (this.sequence.cancellationRequested()) {
             this.outcome.complete(new Outcome(Status.CANCELLED, null));
@@ -210,6 +216,16 @@ public final class QwenExecutionContext {
                             this.plan.projectionWidths());
             this.workspace.allocateBuffers();
         } catch (RuntimeException | Error error) {
+            // Initialization can enqueue zeroes before a later allocation fails. Preserve
+            // every GPU allocation when recovery cannot prove those writes have stopped.
+            if (gpu.asynchronous()) {
+                try {
+                    gpu.synchronize();
+                } catch (RuntimeException | Error synchronizationFailure) {
+                    error.addSuppressed(synchronizationFailure);
+                    gpu.poison(error);
+                }
+            }
             fail(error);
             finish(null, gpu);
         }

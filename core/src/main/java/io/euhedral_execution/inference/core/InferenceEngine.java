@@ -102,7 +102,7 @@ public final class InferenceEngine implements AutoCloseable {
         try {
             QwenTokenizer tokenizer = QwenTokenizer.load(config.tokenizerDirectory());
             QwenArtifact artifact = bootstrap.readArtifact(config.artifactPath());
-            gpu = bootstrap.openGpu(config.cudaLibraryPath());
+            gpu = bootstrap.openGpu(config.cudaLibraryPath(), tuning.gpuExecutionMode());
             model = bootstrap.loadModel(config.artifactPath(), artifact, gpu);
             QwenExecutionPlan plan = new QwenExecutionPlan(model.weights());
             lattice = bootstrap.createLattice(config);
@@ -189,6 +189,7 @@ public final class InferenceEngine implements AutoCloseable {
     /// Creates independent sequence/sampler/decoder state borrowing this engine's shared runtime.
     public synchronized QwenGenerationSession createSession(GenerationConfig config) {
         if (this.closing) throw new IllegalStateException("inference engine is closed");
+        this.gpu.ensureHealthy();
         var session = new QwenGenerationSession(
                 this.tokenizer,
                 this.plan,
@@ -262,6 +263,8 @@ public final class InferenceEngine implements AutoCloseable {
         this.shutdownLock.lock();
         try {
             if (this.resourcesClosed) return;
+            // A failed recovery cannot prove that model or sequence buffers are idle.
+            this.gpu.ensureHealthy();
             // Cancel all before waiting for any one generation. No admission monitor is held while waiting.
             Throwable failure = null;
             for (var session : owned) {
@@ -283,7 +286,7 @@ public final class InferenceEngine implements AutoCloseable {
             // Fail closed: never unload resources after an unproven session shutdown.
             if (failure instanceof RuntimeException exception) throw exception;
             if (failure instanceof Error error) throw error;
-            this.runtime.disconnectRunner();
+            this.runtime.closeCompletionSink();
             // All inference sources have drained before fabric shutdown, even if fabric teardown is asynchronous.
             LAST_CLOSED_LATTICE.set(this.lattice);
             this.lattice.close();
@@ -353,6 +356,10 @@ public final class InferenceEngine implements AutoCloseable {
 
         QwenArtifact readArtifact(Path path) throws IOException {
             return QwenArtifactReader.read(path);
+        }
+
+        ExecutionGpu openGpu(Path path, GpuExecutionMode mode) {
+            return mode == GpuExecutionMode.SYNC ? openGpu(path) : new CudaGpuMemory(path, true);
         }
 
         ExecutionGpu openGpu(Path path) {

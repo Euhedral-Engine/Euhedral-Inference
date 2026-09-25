@@ -141,7 +141,8 @@ class QwenGenerationSessionCudaIntegrationTest {
                                 .orElseThrow();
                         assertTrue(
                                 maximumCallbackFree - minimumCallbackFree <= CALLBACK_FREE_MEMORY_TOLERANCE,
-                                "retained logits caused free device memory to decline between tokens");
+                                "retained logits caused free device memory to decline between tokens: min="
+                                        + minimumCallbackFree + ", max=" + maximumCallbackFree);
                         assertFalse(runtime.hasAttachedRunner());
                         assertTrue(lattice.isDrained());
 
