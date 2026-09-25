@@ -39,6 +39,7 @@ public class ChatRequestMapper {
             Map.entry("top_logprobs", value -> false),
             Map.entry("frequency_penalty", ChatRequestMapper::isZero),
             Map.entry("presence_penalty", ChatRequestMapper::isZero),
+            Map.entry("repeat_penalty", value -> value instanceof Number number && number.doubleValue() == 1.0),
             Map.entry("logit_bias", value -> value instanceof Map<?, ?> map && map.isEmpty()),
             Map.entry("functions", value -> value instanceof List<?> list && list.isEmpty()),
             Map.entry("function_call", "none"::equals),

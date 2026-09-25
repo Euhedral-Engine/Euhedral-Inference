@@ -183,6 +183,7 @@ class OpenAiControllerTest {
                 "\"top_logprobs\":2",
                 "\"frequency_penalty\":0.5",
                 "\"presence_penalty\":1",
+                "\"repeat_penalty\":1.1",
                 "\"response_format\":{\"type\":\"json_object\"}",
                 "\"reasoning_effort\":\"low\"",
                 "\"logit_bias\":{\"1\":5}",
@@ -203,6 +204,22 @@ class OpenAiControllerTest {
         rejected("{\"model\":\"" + MODEL + "\",\"messages\":[{\"role\":\"tool\",\"content\":\"x\"}]}", 400)
                 .andExpect(jsonPath("$.error.param").value("messages[0].role"));
         assertTrue(this.backend.generations.isEmpty(), "rejected requests must not open sessions");
+    }
+
+    @Test
+    void neutralRepeatPenaltyFromPiIsAccepted() throws Exception {
+        completion("{\"model\":\"" + MODEL + "\",\"repeat_penalty\":1.0," + HELLO + "}")
+                .andExpect(status().isOk());
+        assertEquals(1, this.backend.generations.size());
+        assertEquals(20, this.backend.only().config.topK(), "neutral penalty must not change sampling");
+        assertEquals(0.95f, this.backend.only().config.topP());
+    }
+
+    @Test
+    void nullRepeatPenaltyIsEquivalentToOmission() throws Exception {
+        completion("{\"model\":\"" + MODEL + "\",\"repeat_penalty\":null," + HELLO + "}")
+                .andExpect(status().isOk());
+        assertEquals(1, this.backend.generations.size());
     }
 
     @Test
