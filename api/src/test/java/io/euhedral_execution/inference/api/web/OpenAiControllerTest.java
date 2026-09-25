@@ -30,7 +30,7 @@ import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.ResultActions;
 
 /// Controller, mapping, and error-envelope behavior through the real Spring MVC stack, without CUDA.
-@SpringBootTest(classes = ScriptedApiApplication.class)
+@SpringBootTest(classes = ScriptedApiApplication.class, properties = "euhedral.test.scripted-api=true")
 @AutoConfigureMockMvc
 class OpenAiControllerTest {
     private static final String MODEL = ScriptedInferenceBackend.MODEL_ID;
@@ -177,7 +177,7 @@ class OpenAiControllerTest {
     @Test
     void unsupportedBehaviorIsRejectedWithTheParameterName() throws Exception {
         for (String field : List.of(
-                "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]",
+                "\"functions\":[{\"name\":\"f\"}]",
                 "\"n\":2",
                 "\"logprobs\":true",
                 "\"top_logprobs\":2",

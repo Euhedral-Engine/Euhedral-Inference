@@ -36,6 +36,24 @@ manifest, pinned NVIDIA development inputs, and target-specific override propert
 ./gradlew :api:run
 ```
 
+The API serves `/v1/models` and `/v1/chat/completions` (JSON or SSE streaming). Chat
+Completions accepts OpenAI-style function `tools`, `tool_choice` (`auto`, `none`, `required`,
+or a named function), `parallel_tool_calls`, and assistant/tool-message replay. When functions
+are offered, token sampling is constrained to a JSON `tool_calls` envelope or, for `auto`, a
+JSON `content` envelope for an ordinary answer. The latter is returned as normal assistant text,
+not as JSON on the wire. The server validates a complete call before returning OpenAI-style
+`tool_calls` and `finish_reason: "tool_calls"`. With callable tools, SSE emits tool calls and
+ordinary answers only after their JSON envelopes validate, so plain-answer text may be buffered
+until generation ends. Without callable tools, plain text streams incrementally.
+Pass each returned call ID back in a `role: "tool"` message with its result, then send the
+next request. Tool results are JSON-quoted in the model prompt, not executed by the server.
+The model may still choose a non-tool answer with `tool_choice: "auto"`; malformed calls
+fail rather than being returned as successful tool calls. Sampling enforces JSON syntax and
+offered function names, not the full argument schema. Argument checking covers top-level
+types, required names, and `additionalProperties: false`; it does not enforce every JSON Schema
+constraint (such as nested schemas, enum values, or numeric bounds). Requests for function
+`strict: true` are rejected rather than promising full JSON Schema constrained decoding.
+
 ## Container
 
 Build the Linux x86_64 image (JDK 25 and Zig 0.16.0 build stage; minimal Java 25 runtime):
@@ -63,9 +81,23 @@ that same container port with `-p` (for example, `-e PORT=18900 -p 18900:18900`)
 does not embed a static exposed-port declaration, since it would become misleading when
 `PORT` changes. The health probe reads the same setting. The image carries
 CUDA runtime/NVRTC userspace libraries, matching headers for NVRTC, the native library, and
-installed kernel sources; it does not contain the NVIDIA kernel driver. NVIDIA Container
-Toolkit and a compatible host driver are required. `/health` is checked by the image health
+installed kernel sources; it does not contain the NVIDIA kernel driver. With `--gpus all`, NVIDIA
+Container Toolkit and a compatible host driver are required. `/health` is checked by the image health
 probe after the engine has loaded. Set worker CPUs to processor IDs available in your container.
+
+On hosts without NVIDIA Container Toolkit, `--gpus all` cannot initialize the container. On a
+Linux host exposing `/dev/nvidia*` and the driver libraries at the paths below, replace
+`--gpus all` with these explicit device and read-only driver mounts (adjust host paths for your
+distribution):
+
+```text
+--device /dev/nvidia0 --device /dev/nvidiactl --device /dev/nvidia-uvm \
+--device /dev/nvidia-modeset \
+--mount type=bind,src=/usr/lib/x86_64-linux-gnu/libcuda.so.1,dst=/opt/euhedral/lib/libcuda.so.1,readonly \
+--mount type=bind,src=/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1,dst=/opt/euhedral/lib/libnvidia-ptxjitcompiler.so.1,readonly
+```
+
+This is a host-specific alternative to NVIDIA Container Toolkit, not an image-bundled driver.
 
 ## Testing
 

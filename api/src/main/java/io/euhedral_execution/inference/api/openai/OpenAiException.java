@@ -21,6 +21,15 @@ public final class OpenAiException extends RuntimeException {
         return new OpenAiException(HttpStatus.BAD_REQUEST, "invalid_request_error", message, param, null);
     }
 
+    public static OpenAiException requestTooLarge() {
+        return new OpenAiException(
+                HttpStatus.CONTENT_TOO_LARGE,
+                "invalid_request_error",
+                "The chat completion request body exceeds the configured size limit.",
+                null,
+                "request_too_large");
+    }
+
     public static OpenAiException unsupportedParameter(String param) {
         return new OpenAiException(
                 HttpStatus.BAD_REQUEST,
@@ -69,6 +78,17 @@ public final class OpenAiException extends RuntimeException {
                 "The server had an error while processing your request.",
                 null,
                 null);
+    }
+
+    /// The model's output began a tool call that cannot be returned for the offered tools. The reason
+    /// describes only the generated text and the request's own definitions.
+    public static OpenAiException invalidToolCall(String reason) {
+        return new OpenAiException(
+                HttpStatus.INTERNAL_SERVER_ERROR,
+                "server_error",
+                "The model produced an invalid tool call: " + reason + ".",
+                null,
+                "invalid_tool_call");
     }
 
     public static OpenAiException timeout() {

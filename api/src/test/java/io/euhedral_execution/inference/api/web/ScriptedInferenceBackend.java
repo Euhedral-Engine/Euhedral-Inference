@@ -92,9 +92,10 @@ final class ScriptedInferenceBackend implements InferenceBackend {
     }
 
     @Override
-    public Generation openGeneration(GenerationConfig config) {
+    public Generation openGeneration(GenerationConfig config, ToolConstraint constraint) {
         if (!this.available) throw new InferenceUnavailableException("inference engine is shutting down");
         var generation = new ScriptedGeneration(config, this.script);
+        generation.constraint = constraint;
         this.generations.add(generation);
         return generation;
     }
@@ -109,6 +110,7 @@ final class ScriptedInferenceBackend implements InferenceBackend {
         private final Script script;
         private final AtomicBoolean cancelled = new AtomicBoolean();
         volatile String prompt;
+        volatile ToolConstraint constraint;
         volatile int maxNewTokens;
         volatile String generatingThread;
 

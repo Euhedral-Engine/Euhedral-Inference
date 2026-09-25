@@ -4,6 +4,7 @@ import io.euhedral_execution.inference.api.chat.QwenChatTemplate;
 import io.euhedral_execution.inference.core.InferenceEngine;
 import io.euhedral_execution.inference.core.sampling.GenerationConfig;
 import io.euhedral_execution.inference.core.scheduling.QwenGenerationSession;
+import io.euhedral_execution.inference.core.tokenizer.JsonEnvelopeConstraint;
 import io.euhedral_execution.inference.core.tokenizer.QwenTokenizer;
 import java.util.List;
 import java.util.Objects;
@@ -48,10 +49,17 @@ public final class EngineInferenceBackend implements InferenceBackend {
     }
 
     @Override
-    public Generation openGeneration(GenerationConfig config) {
+    public Generation openGeneration(GenerationConfig config, ToolConstraint constraint) {
         if (this.engine.isClosed()) throw new InferenceUnavailableException("inference engine is shutting down");
         try {
-            return new SessionGeneration(this.engine.createSession(config), this.engine.tokenizer());
+            JsonEnvelopeConstraint grammar = constraint == null
+                    ? null
+                    : new JsonEnvelopeConstraint(
+                            this.engine.tokenizer(),
+                            constraint.toolNames(),
+                            constraint.requiresCall(),
+                            constraint.parallel());
+            return new SessionGeneration(this.engine.createSession(config), this.engine.tokenizer(), grammar);
         } catch (IllegalStateException closed) {
             // createSession's only state failure is closed admission; anything else is a real fault.
             if (this.engine.isClosed()) throw new InferenceUnavailableException("inference engine is shutting down");
@@ -59,12 +67,14 @@ public final class EngineInferenceBackend implements InferenceBackend {
         }
     }
 
-    private record SessionGeneration(QwenGenerationSession session, QwenTokenizer tokenizer) implements Generation {
+    private record SessionGeneration(
+            QwenGenerationSession session, QwenTokenizer tokenizer, JsonEnvelopeConstraint constraint)
+            implements Generation {
 
         @Override
         public Result generate(String prompt, int maxNewTokens, Consumer<String> output)
                 throws InterruptedException, ExecutionException {
-            List<Integer> tokenIds = this.session.generate(prompt, maxNewTokens, output);
+            List<Integer> tokenIds = this.session.generate(prompt, maxNewTokens, output, this.constraint);
             boolean stopToken = !tokenIds.isEmpty() && this.tokenizer.isGenerationEosToken(tokenIds.getLast());
             return new Result(tokenIds.size(), stopToken);
         }

@@ -5,8 +5,10 @@ import io.euhedral_execution.inference.api.engine.InferenceBackend;
 import io.euhedral_execution.inference.api.openai.ChatCompletionChunk;
 import io.euhedral_execution.inference.api.openai.ChatCompletionResponse;
 import io.euhedral_execution.inference.api.openai.OpenAiException;
+import io.euhedral_execution.inference.api.openai.ToolCall;
 import io.euhedral_execution.inference.api.openai.Usage;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -87,7 +89,12 @@ public class ChatCompletionService implements DisposableBean {
     }
 
     private InferenceBackend.Generation open(ChatCompletionPlan plan) {
-        return this.backend.openGeneration(plan.sampling());
+        if (!plan.tools().parsesOutput()) return this.backend.openGeneration(plan.sampling());
+        var constraint = new InferenceBackend.ToolConstraint(
+                plan.tools().callable().stream().map(FunctionTool::name).toList(),
+                plan.tools().choice() != ToolCalling.Choice.AUTO,
+                plan.tools().parallel());
+        return this.backend.openGeneration(plan.sampling(), constraint);
     }
 
     private void submit(ChatGeneration job) {
@@ -114,6 +121,7 @@ public class ChatCompletionService implements DisposableBean {
         private final ChatCompletionPlan plan;
         private final DeferredResult<ResponseEntity<ChatCompletionResponse>> result;
         private final StringBuilder content = new StringBuilder();
+        private final List<ToolCall> toolCalls = new ArrayList<>();
 
         private JsonSink(ChatCompletionPlan plan, DeferredResult<ResponseEntity<ChatCompletionResponse>> result) {
             this.plan = plan;
@@ -129,12 +137,18 @@ public class ChatCompletionService implements DisposableBean {
         }
 
         @Override
+        public void toolCall(int index, ToolCall call) {
+            this.toolCalls.add(call);
+        }
+
+        @Override
         public void finish(String finishReason, Usage usage) {
             var response = ChatCompletionResponse.of(
                     this.plan.id(),
                     this.plan.created(),
                     this.plan.model(),
                     this.content.toString(),
+                    this.toolCalls,
                     finishReason,
                     usage);
             this.result.setResult(ResponseEntity.ok().contentType(JSON).body(response));
@@ -164,6 +178,11 @@ public class ChatCompletionService implements DisposableBean {
         @Override
         public void text(String delta) throws IOException {
             send(ChatCompletionChunk.content(this.plan.id(), this.plan.created(), this.plan.model(), delta));
+        }
+
+        @Override
+        public void toolCall(int index, ToolCall call) throws IOException {
+            send(ChatCompletionChunk.toolCall(this.plan.id(), this.plan.created(), this.plan.model(), index, call));
         }
 
         @Override
