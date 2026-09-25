@@ -205,9 +205,10 @@ val nativeTasks = products.associate { product ->
     require((explicitInclude == null) == (explicitLibrary == null)) {
         "Both $prefix.include-dir and $prefix.library-dir are required for $id"
     }
+    // An arbitrary host default (for example /usr/local/cuda) can produce PTX newer than the
+    // installed driver accepts. Use the pinned runtime unless the caller selects a toolkit.
     val toolkitHome = if (product == host) {
         providers.environmentVariable("CUDA_HOME").orNull ?: providers.environmentVariable("CUDA_PATH").orNull
-            ?: if (windows) "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.1" else "/usr/local/cuda"
     } else null
     val toolkit = toolkitHome?.let(::file)
     val toolkitInclude = toolkit?.resolve(if (windows) "include" else "targets/x86_64-linux/include")

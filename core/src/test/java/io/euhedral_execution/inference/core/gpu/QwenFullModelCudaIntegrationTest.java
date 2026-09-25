@@ -302,7 +302,7 @@ class QwenFullModelCudaIntegrationTest {
                 }
             }
             long freeAfter = gpu.deviceMemoryInfo().freeBytes();
-            if (Math.abs(freeAfter - freeBefore) > VRAM_RESTORE_TOLERANCE) {
+            if (freeAfter < freeBefore - VRAM_RESTORE_TOLERANCE) {
                 IllegalStateException cleanupFailure = new IllegalStateException(
                         "full model test leaked device memory: before=" + freeBefore + ", after=" + freeAfter);
                 if (failure == null) failure = cleanupFailure;

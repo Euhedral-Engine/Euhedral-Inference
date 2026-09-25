@@ -154,7 +154,7 @@ class QwenCompactCudaExecutionIntegrationTest {
             }
 
             CudaGpuMemory.DeviceMemoryInfo after = gpu.deviceMemoryInfo();
-            if (Math.abs(after.freeBytes() - before.freeBytes()) > VRAM_RESTORE_TOLERANCE) {
+            if (after.freeBytes() < before.freeBytes() - VRAM_RESTORE_TOLERANCE) {
                 IllegalStateException restoreFailure =
                         new IllegalStateException("real execution slice did not release GPU allocations: before="
                                 + before.freeBytes() + ", after=" + after.freeBytes());

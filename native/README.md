@@ -33,11 +33,13 @@ The ZIP contains the native library and `.cu` sources, not NVIDIA CUDA runtime l
 Deploy target-matching CUDA runtime and NVRTC (including builtins) separately, or use the
 container image, which installs the pinned Linux CUDA user-space runtime libraries.
 
-For ordinary builds Gradle uses matching host toolkit metadata from `CUDA_HOME` or `CUDA_PATH`,
-then the current platform's standard CUDA location (`/usr/local/cuda` on Linux, CUDA v13.1
-under Program Files on Windows). The host toolkit must have headers at version 13.1 or higher,
+For ordinary builds Gradle uses the pinned CUDA 13.1 redistributables. Set `CUDA_HOME` or
+`CUDA_PATH` to explicitly select an installed matching host toolkit instead; merely installing
+one at `/usr/local/cuda` or under Program Files does not override the pinned default. A newer
+host NVRTC can emit PTX the installed driver cannot JIT, even if its headers and libraries link.
+The selected host toolkit must have headers at version 13.1 or higher,
 the runtime/NVRTC link libraries, and the target driver stub/import library. When no suitable
-host toolkit is present, Gradle downloads the official NVIDIA 13.1 cudart, NVRTC, CUDA CRT,
+host toolkit is selected, Gradle downloads the official NVIDIA 13.1 cudart, NVRTC, CUDA CRT,
 and CCCL redistributable archives for each target, checks the SHA-256 values in the manifest,
 and caches them under the Gradle user home. The Windows driver import is generated with the
 pinned Zig `dlltool` from an explicit driver ABI export list; it does not link the host's

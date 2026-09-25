@@ -80,3 +80,10 @@ subprojects {
         }
     }
 }
+
+// Both CUDA integration suites load the compact model. Do not overlap them on one GPU.
+gradle.projectsEvaluated {
+    project(":api").tasks.named<Test>("cudaIntegrationTest") {
+        mustRunAfter(project(":core").tasks.named<Test>("cudaIntegrationTest"))
+    }
+}

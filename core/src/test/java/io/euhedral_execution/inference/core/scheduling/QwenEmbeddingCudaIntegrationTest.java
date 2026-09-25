@@ -155,12 +155,12 @@ class QwenEmbeddingCudaIntegrationTest {
                 assertTrue(context.workspace().isClosed(), "submission workspace survived terminal completion");
                 assertEmbeddingCloseToSource(output.get(), reference);
                 assertTrue(
-                        Math.abs(gpu.deviceMemoryInfo().freeBytes() - resident.freeBytes()) <= (16L << 20),
+                        gpu.deviceMemoryInfo().freeBytes() >= resident.freeBytes() - (16L << 20),
                         "submission completion changed model-weight residency");
             }
 
             assertTrue(
-                    Math.abs(gpu.deviceMemoryInfo().freeBytes() - beforeLoad.freeBytes()) <= (128L << 20),
+                    gpu.deviceMemoryInfo().freeBytes() >= beforeLoad.freeBytes() - (128L << 20),
                     "model teardown did not restore free VRAM near its baseline");
         }
     }

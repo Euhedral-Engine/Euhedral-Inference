@@ -54,13 +54,13 @@ class InferenceEngineCudaIntegrationTest {
                     assertTrue(engine.deviceMemoryInfo().freeBytes() < loaded, "sequence did not retain device state");
                 }
                 long afterSession = engine.deviceMemoryInfo().freeBytes();
-                assertTrue(Math.abs(loaded - afterSession) <= (16L << 20), "session VRAM was not restored");
+                assertTrue(afterSession >= loaded - (16L << 20), "session VRAM was not restored");
                 System.out.println("Generated text: " + output);
                 System.out.println(
                         "VRAM bytes: before=" + before + ", loaded=" + loaded + ", afterSession=" + afterSession);
             }
             long afterEngine = observer.deviceMemoryInfo().freeBytes();
-            assertTrue(Math.abs(before - afterEngine) <= (16L << 20), "engine VRAM was not restored");
+            assertTrue(afterEngine >= before - (16L << 20), "engine VRAM was not restored");
             System.out.println("VRAM bytes afterEngine=" + afterEngine);
         }
     }

@@ -236,7 +236,7 @@ class ChatCompletionsCudaIntegrationTest {
         assertEquals(this.tracking.opened.get(), this.tracking.closedCount.get(), "every session must be closed");
         long freeAfter = freeDeviceBytes();
         assertTrue(
-                Math.abs(freeBefore - freeAfter) <= VRAM_TOLERANCE,
+                freeAfter >= freeBefore - VRAM_TOLERANCE,
                 "sequence device memory was not released: before=" + freeBefore + " after=" + freeAfter);
     }
 

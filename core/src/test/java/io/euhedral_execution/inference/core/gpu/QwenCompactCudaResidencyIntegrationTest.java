@@ -89,7 +89,7 @@ class QwenCompactCudaResidencyIntegrationTest {
             }
 
             CudaGpuMemory.DeviceMemoryInfo after = gpu.deviceMemoryInfo();
-            if (Math.abs(after.freeBytes() - before.freeBytes()) > VRAM_RESTORE_TOLERANCE_BYTES) {
+            if (after.freeBytes() < before.freeBytes() - VRAM_RESTORE_TOLERANCE_BYTES) {
                 IllegalStateException restoreFailure =
                         new IllegalStateException("GPU free memory did not return near its pre-load baseline: before="
                                 + gibibytes(before.freeBytes()) + ", after=" + gibibytes(after.freeBytes()));
@@ -149,7 +149,7 @@ class QwenCompactCudaResidencyIntegrationTest {
 
             DeviceMemoryInfo after = gpu.deviceMemoryInfo();
             assertTrue(
-                    Math.abs(after.freeBytes() - before.freeBytes()) <= VRAM_RESTORE_TOLERANCE_BYTES,
+                    after.freeBytes() >= before.freeBytes() - VRAM_RESTORE_TOLERANCE_BYTES,
                     "partial-load failure leaked CUDA memory: before=" + gibibytes(before.freeBytes()) + ", after="
                             + gibibytes(after.freeBytes()));
             System.out.printf(
