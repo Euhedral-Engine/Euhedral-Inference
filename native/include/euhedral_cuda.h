@@ -200,6 +200,7 @@ EUHEDRAL_CUDA_EXPORT int euhedral_cuda_attention_causal_bf16(
 EUHEDRAL_CUDA_EXPORT int euhedral_cuda_synchronize(void);
 EUHEDRAL_CUDA_EXPORT uint64_t euhedral_cuda_stream_create(void);
 EUHEDRAL_CUDA_EXPORT int euhedral_cuda_stream_destroy(uint64_t stream);
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_stream_synchronize(uint64_t stream);
 EUHEDRAL_CUDA_EXPORT int euhedral_cuda_stream_select(uint64_t stream);
 EUHEDRAL_CUDA_EXPORT void euhedral_cuda_stream_clear(void);
 EUHEDRAL_CUDA_EXPORT uint64_t euhedral_cuda_completion_event_create(void);

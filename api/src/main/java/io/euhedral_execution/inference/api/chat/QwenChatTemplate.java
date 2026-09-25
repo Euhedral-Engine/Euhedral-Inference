@@ -145,8 +145,9 @@ public final class QwenChatTemplate {
     /// Verifies that `source` is the Qwen template this formatter reproduces.
     public static QwenChatTemplate fromTemplateSource(String source) throws IOException {
         Objects.requireNonNull(source, "source");
+        String normalizedSource = source.replace("\r\n", "\n");
         for (String fragment : REQUIRED_FRAGMENTS) {
-            if (!source.contains(fragment))
+            if (!normalizedSource.contains(fragment))
                 throw new IOException(
                         "unsupported checkpoint chat template; the Qwen formatter no longer matches fragment: "
                                 + fragment);

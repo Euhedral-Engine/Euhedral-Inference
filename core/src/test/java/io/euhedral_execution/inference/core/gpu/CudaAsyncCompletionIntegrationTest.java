@@ -3,6 +3,7 @@ package io.euhedral_execution.inference.core.gpu;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -24,6 +25,49 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 class CudaAsyncCompletionIntegrationTest {
+    @Test
+    @Timeout(value = 15, unit = TimeUnit.SECONDS)
+    void partialWorkerStartupReleasesOrphanedStreams() {
+        String selected =
+                System.getProperty("euhedral.cuda.async.library", System.getProperty("euhedral.cuda.library"));
+        assumeTrue(selected != null, "a candidate CUDA library is required");
+        try (var gpu = new CudaGpuMemory(Path.of(selected), true)) {
+            gpu.openWorker(3);
+            gpu.openWorker(7);
+            gpu.abortWorkerStartup();
+            gpu.ensureWorkersClosed();
+            assertThrows(IllegalStateException.class, () -> gpu.openWorker(9));
+        }
+    }
+
+    @Test
+    @Timeout(value = 15, unit = TimeUnit.SECONDS)
+    void separateWorkersRetainIndependentStreamsAcrossFrames() throws Exception {
+        String selected =
+                System.getProperty("euhedral.cuda.async.library", System.getProperty("euhedral.cuda.library"));
+        assumeTrue(selected != null, "a candidate CUDA library is required");
+        try (var gpu = new CudaGpuMemory(Path.of(selected), true)) {
+            long firstWorker = gpu.openWorker(3);
+            long secondWorker = gpu.openWorker(7);
+            assertThrows(IllegalStateException.class, gpu::ensureWorkersClosed);
+            long first = gpu.workerStream(firstWorker);
+            long second = gpu.workerStream(secondWorker);
+            assertTrue(first != 0 && second != 0 && first != second);
+            assertEquals(
+                    first, gpu.workerStream(firstWorker), "a worker must reuse its stream for its entire lifetime");
+            long replacement = gpu.openWorker(3);
+            assertTrue(first != gpu.workerStream(replacement), "a replacement on the same CPU needs its own stream");
+            gpu.closeWorker(firstWorker);
+            assertEquals(second, gpu.workerStream(secondWorker));
+            assertThrows(IllegalStateException.class, gpu::ensureWorkersClosed);
+            gpu.closeWorker(secondWorker);
+            gpu.closeWorker(replacement);
+            gpu.ensureWorkersClosed();
+            gpu.close();
+            assertThrows(IllegalStateException.class, () -> gpu.openWorker(9));
+        }
+    }
+
     @Test
     @Timeout(value = 15, unit = TimeUnit.SECONDS)
     void deviceAllocationDoesNotWaitForEarlierGpuWork() throws Exception {
