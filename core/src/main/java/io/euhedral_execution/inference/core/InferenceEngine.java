@@ -17,8 +17,10 @@ import io.euhedral_execution.inference.core.scheduling.QwenExecutionPlan;
 import io.euhedral_execution.inference.core.scheduling.QwenGenerationSession;
 import io.euhedral_execution.inference.core.tokenizer.QwenTokenizer;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -44,6 +46,10 @@ public final class InferenceEngine implements AutoCloseable {
     private final ControlPlaneLattice lattice;
     private final QwenExecutionPlan plan;
     private final EuhedralInferenceRuntime runtime;
+    private final InferenceTuning tuning;
+    private final BitSet workerCoreIds;
+    private final InferenceRunSnapshot.Model modelIdentity;
+    private final InferenceRunSnapshot.RuntimeIdentity runtimeIdentity;
     private final List<QwenGenerationSession> sessions = new ArrayList<>();
     private final ReentrantLock shutdownLock = new ReentrantLock();
     private volatile boolean closing;
@@ -56,7 +62,11 @@ public final class InferenceEngine implements AutoCloseable {
             QwenModel model,
             ControlPlaneLattice lattice,
             QwenExecutionPlan plan,
-            EuhedralInferenceRuntime runtime) {
+            EuhedralInferenceRuntime runtime,
+            InferenceTuning tuning,
+            BitSet workerCoreIds,
+            InferenceRunSnapshot.Model modelIdentity,
+            InferenceRunSnapshot.RuntimeIdentity runtimeIdentity) {
         this.bootstrap = bootstrap;
         this.tokenizer = tokenizer;
         this.gpu = gpu;
@@ -64,15 +74,26 @@ public final class InferenceEngine implements AutoCloseable {
         this.lattice = lattice;
         this.plan = plan;
         this.runtime = runtime;
+        this.tuning = tuning;
+        this.workerCoreIds = workerCoreIds;
+        this.modelIdentity = modelIdentity;
+        this.runtimeIdentity = runtimeIdentity;
     }
 
     /// Loads all model resources and starts the lattice before returning an engine.
+    /// The config's [InferenceTuning] is applied as given; worker processor IDs are checked against
+    /// the host [ProcessorTopology] before the tokenizer, model, or GPU is loaded.
     public static InferenceEngine load(InferenceConfig config) throws IOException {
         return load(config, new Bootstrap());
     }
 
     static InferenceEngine load(InferenceConfig config, Bootstrap bootstrap) throws IOException {
         Objects.requireNonNull(config, "config");
+        InferenceTuning tuning = config.tuning();
+        // Euhedral silently drops unavailable CPUs; fail before claiming the lattice or loading anything.
+        ProcessorTopology topology = bootstrap.processorTopology();
+        topology.requireAvailable(tuning.workerProcessorIds());
+        BitSet workerCoreIds = topology.coreIds(tuning.workerProcessorIds());
         if (!LATTICE_OWNED.compareAndSet(false, true))
             throw new IllegalStateException("an inference engine already owns the process-wide Euhedral lattice");
         ExecutionGpu gpu = null;
@@ -87,7 +108,18 @@ public final class InferenceEngine implements AutoCloseable {
             lattice = bootstrap.createLattice(config);
             bootstrap.startLattice(lattice);
             EuhedralInferenceRuntime runtime = new EuhedralInferenceRuntime(lattice, plan, gpu);
-            return new InferenceEngine(bootstrap, tokenizer, gpu, model, lattice, plan, runtime);
+            return new InferenceEngine(
+                    bootstrap,
+                    tokenizer,
+                    gpu,
+                    model,
+                    lattice,
+                    plan,
+                    runtime,
+                    tuning,
+                    workerCoreIds,
+                    modelIdentity(config.artifactPath(), artifact, model),
+                    runtimeIdentity(config.cudaLibraryPath()));
         } catch (IOException | RuntimeException | Error failure) {
             var pending = new StartupFailure(
                     failure,
@@ -164,6 +196,7 @@ public final class InferenceEngine implements AutoCloseable {
                 this.gpu,
                 SEQUENCE_IDS.getAndIncrement(),
                 Objects.requireNonNull(config, "config"),
+                this.tuning.prefillChunkTokens(),
                 this::releaseSession);
         this.sessions.add(session);
         return session;
@@ -180,6 +213,28 @@ public final class InferenceEngine implements AutoCloseable {
     public QwenConfig modelConfig() {
         return this.model.weights().config();
     }
+
+    /// Returns the immutable tuning this engine was loaded with; its worker IDs are the engine's workers.
+    public InferenceTuning tuning() {
+        return this.tuning;
+    }
+
+    /// Returns an experiment snapshot without generation settings. Identity was measured at load.
+    public InferenceRunSnapshot snapshot() {
+        return snapshot(null);
+    }
+
+    /// Returns an experiment snapshot recording the caller-supplied generation settings, if any.
+    public InferenceRunSnapshot snapshot(GenerationConfig generation) {
+        return new InferenceRunSnapshot(
+                InferenceRunSnapshot.SCHEMA_VERSION,
+                InferenceRunSnapshot.Tuning.of(this.tuning),
+                InferenceRunSnapshot.ids(this.workerCoreIds),
+                this.modelIdentity,
+                generation,
+                this.runtimeIdentity);
+    }
+
     /// True as soon as shutdown begins; no further sessions can be admitted.
     public boolean isClosed() {
         return this.closing;
@@ -244,12 +299,58 @@ public final class InferenceEngine implements AutoCloseable {
         }
     }
 
+    private static InferenceRunSnapshot.Model modelIdentity(Path path, QwenArtifact artifact, QwenModel model) {
+        Long bytes;
+        try {
+            bytes = Files.size(path);
+        } catch (IOException | SecurityException unreadable) {
+            bytes = null;
+        }
+        return new InferenceRunSnapshot.Model(
+                path.toString(),
+                bytes,
+                artifact == null ? null : artifact.header().version(),
+                InferenceRunSnapshot.Dimensions.of(model.weights().config()));
+    }
+
+    private static InferenceRunSnapshot.RuntimeIdentity runtimeIdentity(Path nativeLibrary) {
+        Package euhedral = ControlPlaneLattice.class.getPackage();
+        return new InferenceRunSnapshot.RuntimeIdentity(
+                Runtime.version().toString(),
+                System.getProperty("java.vendor"),
+                System.getProperty("java.vm.name"),
+                System.getProperty("os.name"),
+                System.getProperty("os.arch"),
+                euhedral == null ? null : euhedral.getImplementationVersion(),
+                codeSourceName(ControlPlaneLattice.class),
+                nativeLibrary.toString(),
+                InferenceRunSnapshot.UNAVAILABLE);
+    }
+
+    /// Returns the file name of the JAR or directory that loaded a class, such as `euhedral-core-0.0.7.jar`.
+    private static String codeSourceName(Class<?> type) {
+        try {
+            var source = type.getProtectionDomain().getCodeSource();
+            if (source == null) return null;
+            String location = source.getLocation().toString();
+            while (location.endsWith("/") || location.endsWith("!"))
+                location = location.substring(0, location.length() - 1);
+            return location.substring(location.lastIndexOf('/') + 1);
+        } catch (RuntimeException unavailable) {
+            return null;
+        }
+    }
+
     private static void suppress(Throwable failure, Throwable cleanup) {
         if (failure != cleanup) failure.addSuppressed(cleanup);
     }
 
     // Package-private construction seam for failure injection, not an alternative public backend API.
     static class Bootstrap {
+        ProcessorTopology processorTopology() {
+            return ProcessorTopology.system();
+        }
+
         QwenArtifact readArtifact(Path path) throws IOException {
             return QwenArtifactReader.read(path);
         }

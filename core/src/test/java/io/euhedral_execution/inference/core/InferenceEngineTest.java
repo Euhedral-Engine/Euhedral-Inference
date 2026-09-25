@@ -9,10 +9,12 @@ import io.euhedral_execution.inference.core.model_loader.QwenModel;
 import io.euhedral_execution.inference.core.model_loader.artifact.QwenArtifact;
 import io.euhedral_execution.inference.core.sampling.GenerationConfig;
 import io.euhedral_execution.inference.core.scheduling.EngineExecutionFixture;
+import io.euhedral_execution.inference.core.scheduling.GenerationTimingListener;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.BitSet;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
@@ -388,14 +390,227 @@ class InferenceEngineTest {
         }
     }
 
+    InferenceConfig config(InferenceTuning tuning) throws Exception {
+        var legacy = config();
+        return new InferenceConfig(
+                legacy.artifactPath(),
+                legacy.tokenizerDirectory(),
+                legacy.cudaLibraryPath(),
+                tuning,
+                legacy.shutdownTimeout());
+    }
+
+    private static List<Integer> prefillChunkLengths(EngineExecutionFixture.SamplingGpu gpu, int decodeQuanta) {
+        var inputs = gpu.embeddingInputs;
+        return inputs.subList(0, inputs.size() - decodeQuanta).stream()
+                .map(chunk -> chunk.length)
+                .toList();
+    }
+
+    @Test
+    void programmaticTuningReachesTheSessionPrefillLoop() throws Exception {
+        var bootstrap = new FakeBootstrap();
+        var tuning = InferenceTuning.defaults(config().workerCpus()).withPrefillChunkTokens(2);
+        try (var engine = InferenceEngine.load(config(tuning), bootstrap);
+                var session = engine.createSession(GenerationConfig.greedy(1L))) {
+            assertEquals(tuning, engine.tuning());
+            int promptTokens = engine.tokenizer().encodeWithModelSpecialTokens("!!!!!").length;
+            assertEquals(5, promptTokens);
+            assertEquals(List.of(1), session.generate("!!!!!", 1, ignored -> {}));
+            assertEquals(List.of(2, 2, 1), prefillChunkLengths(bootstrap.gpu, 1));
+            assertEquals(6, session.currentTokenPosition());
+        }
+    }
+
+    @Test
+    void legacyConfigurationKeepsTheDefault512TokenPrefillChunks() throws Exception {
+        var bootstrap = new FakeBootstrap();
+        var legacy = config();
+        String prompt = "!".repeat(1100);
+        try (var engine = InferenceEngine.load(legacy, bootstrap);
+                var session = engine.createSession(GenerationConfig.greedy(1L))) {
+            assertEquals(InferenceTuning.defaults(legacy.workerCpus()), engine.tuning());
+            assertEquals(legacy.workerCpus(), engine.tuning().workerProcessorIds());
+            assertEquals(1100, engine.tokenizer().encodeWithModelSpecialTokens(prompt).length);
+            session.generate(prompt, 1, ignored -> {});
+            assertEquals(List.of(512, 512, 76), prefillChunkLengths(bootstrap.gpu, 1));
+        }
+    }
+
+    @Test
+    void rejectsUnavailableWorkersBeforeLoadingAnyResource() throws Exception {
+        var bootstrap = new FakeBootstrap() {
+            @Override
+            ProcessorTopology processorTopology() {
+                return WorkerProcessorSelectionTest.HYBRID;
+            }
+        };
+        Files.delete(config().tokenizerDirectory().resolve("tokenizer.json"));
+        for (int unavailable : new int[] {13, 2}) {
+            var config = new InferenceConfig(
+                    directory.resolve("model.edrl"),
+                    directory,
+                    directory.resolve("lib.so"),
+                    ProcessorTopology.bits(0, unavailable),
+                    Duration.ofSeconds(10));
+            var failure = assertThrows(IllegalArgumentException.class, () -> InferenceEngine.load(config, bootstrap));
+            assertTrue(failure.getMessage().contains("{" + unavailable + "}"), failure.getMessage());
+        }
+        assertEquals(0, bootstrap.artifactReads);
+        assertFalse(bootstrap.gpuClosed);
+        try (var engine = InferenceEngine.load(config(), new FakeBootstrap())) {
+            assertFalse(engine.isClosed(), "rejection must not retain the process-wide lattice");
+        }
+    }
+
+    @Test
+    void snapshotRecordsTheEngineTuningIdentityAndSuppliedGeneration() throws Exception {
+        var tuning = InferenceTuning.defaults(config().workerCpus()).withPrefillChunkTokens(64);
+        var generation = new GenerationConfig(0.5f, 3, 0.9f, 7L, false);
+        try (var engine = InferenceEngine.load(config(tuning), new FakeBootstrap())) {
+            var snapshot = engine.snapshot(generation);
+            int cpu = tuning.workerProcessorIds().nextSetBit(0);
+            assertEquals(new InferenceRunSnapshot.Tuning(List.of(cpu), 64), snapshot.tuning());
+            assertEquals(List.of(SystemInfo.getCpuInfo(cpu).core()), snapshot.workerCoreIds());
+            assertEquals(generation, snapshot.generation());
+            assertNull(engine.snapshot().generation());
+            assertEquals(
+                    directory.resolve("model.edrl").toString(), snapshot.model().artifactPath());
+            assertNull(snapshot.model().artifactBytes(), "missing artifact file has no measured size");
+            assertEquals(
+                    InferenceRunSnapshot.Dimensions.of(engine.modelConfig()),
+                    snapshot.model().dimensions());
+            var runtime = snapshot.runtime();
+            assertEquals(Runtime.version().toString(), runtime.javaVersion());
+            assertEquals(InferenceRunSnapshot.UNAVAILABLE, runtime.nativeRuntimeVersion());
+            assertEquals(directory.resolve("lib.so").toString(), runtime.nativeLibraryPath());
+            assertTrue(runtime.euhedralCoreArtifact().startsWith("euhedral-core"), runtime.euhedralCoreArtifact());
+            assertEquals(snapshot.toJson(), engine.snapshot(generation).toJson());
+            assertTrue(snapshot.toJson().contains("\"prefillChunkTokens\":64"), snapshot.toJson());
+        }
+    }
+
+    /// Records timing events as strings with their timestamps, in call order.
+    static final class RecordingTiming implements GenerationTimingListener {
+        final List<String> events = new java.util.ArrayList<>();
+        final List<Long> times = new java.util.ArrayList<>();
+
+        private void add(String event, long... nanos) {
+            events.add(event);
+            for (long time : nanos) times.add(time);
+        }
+
+        @Override
+        public void promptEncoded(long nanos, int promptTokens) {
+            add("encoded:" + promptTokens, nanos);
+        }
+
+        @Override
+        public void prefillQuantum(long startNanos, long executedNanos, int tokens) {
+            add("prefill:" + tokens, startNanos, executedNanos);
+        }
+
+        @Override
+        public void firstTokenSelected(long nanos, int tokenId) {
+            add("first:" + tokenId, nanos);
+        }
+
+        @Override
+        public void decodeQuantum(
+                long startNanos, long executedNanos, long selectedNanos, boolean sampled, int selectedTokenId) {
+            if (!sampled) assertEquals(executedNanos, selectedNanos);
+            add(sampled ? "decode:" + selectedTokenId : "commit", startNanos, executedNanos, selectedNanos);
+        }
+
+        void output(String text) {
+            add("output:" + text, System.nanoTime());
+        }
+    }
+
+    private static void assertNonDecreasing(List<Long> times) {
+        for (int index = 1; index < times.size(); index++)
+            assertTrue(times.get(index - 1) <= times.get(index), "timing boundary out of order at " + index);
+    }
+
+    @Test
+    void timingBoundariesFollowPrefillSelectionOutputAndCommitOrder() throws Exception {
+        var bootstrap = new FakeBootstrap();
+        bootstrap.gpu.selectTokens(1, 2, 3);
+        var tuning = InferenceTuning.defaults(config().workerCpus()).withPrefillChunkTokens(2);
+        try (var engine = InferenceEngine.load(config(tuning), bootstrap);
+                var session = engine.createSession(GenerationConfig.greedy(1L))) {
+            var timing = new RecordingTiming();
+            assertEquals(List.of(1, 2, 3), session.generate("!!!!!", 3, timing::output, null, timing));
+            assertEquals(
+                    List.of(
+                            "encoded:5",
+                            "prefill:2",
+                            "prefill:2",
+                            "prefill:1",
+                            "first:1",
+                            "output:A",
+                            "decode:2",
+                            "output:B",
+                            "decode:3",
+                            "output:C",
+                            "commit"),
+                    timing.events);
+            assertNonDecreasing(timing.times);
+        }
+    }
+
+    @Test
+    void prefillOnlyAndImmediateEosReportNoDecodeWork() throws Exception {
+        var bootstrap = new FakeBootstrap();
+        try (var engine = InferenceEngine.load(config(), bootstrap)) {
+            var prefillOnly = new RecordingTiming();
+            try (var session = engine.createSession(GenerationConfig.greedy(1L))) {
+                assertEquals(List.of(), session.generate("!!!", 0, prefillOnly::output, null, prefillOnly));
+            }
+            assertEquals(List.of("encoded:3", "prefill:3"), prefillOnly.events, "prefill-only has no first token");
+
+            bootstrap.gpu.selectTokens(7);
+            var eos = new RecordingTiming();
+            try (var session = engine.createSession(GenerationConfig.greedy(1L))) {
+                assertEquals(List.of(7), session.generate("!!!", 8, eos::output, null, eos));
+            }
+            assertEquals(List.of("encoded:3", "prefill:3", "first:7"), eos.events, "EOS is never committed");
+        }
+    }
+
+    @Test
+    void disabledTimingLeavesGenerationUnchanged() throws Exception {
+        var disabled = new FakeBootstrap();
+        var enabled = new FakeBootstrap();
+        List<Integer> withoutTiming;
+        try (var engine = InferenceEngine.load(config(), disabled);
+                var session = engine.createSession(GenerationConfig.greedy(1L))) {
+            withoutTiming = session.generate("!!!!", 3, ignored -> {}, null, null);
+            assertEquals(withoutTiming, session.generatedTokenIds());
+        }
+        try (var engine = InferenceEngine.load(config(), enabled);
+                var session = engine.createSession(GenerationConfig.greedy(1L))) {
+            assertEquals(withoutTiming, session.generate("!!!!", 3, ignored -> {}, null, new RecordingTiming()));
+        }
+        assertEquals(
+                disabled.gpu.embeddingInputs.stream()
+                        .map(java.util.Arrays::toString)
+                        .toList(),
+                enabled.gpu.embeddingInputs.stream()
+                        .map(java.util.Arrays::toString)
+                        .toList());
+    }
+
     static class FakeBootstrap extends InferenceEngine.Bootstrap {
         final EngineExecutionFixture.SamplingGpu gpu = new EngineExecutionFixture.SamplingGpu(8);
         volatile boolean gpuClosed;
         int gpuCloseCount;
         int modelLoads;
+        int artifactReads;
 
         @Override
         QwenArtifact readArtifact(Path path) {
+            artifactReads++;
             return null;
         }
 

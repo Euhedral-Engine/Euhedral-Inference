@@ -21,8 +21,11 @@ import java.util.function.Consumer;
 /// each completed prompt-to-output stream is flushed before the decoder is replaced for a later prompt.
 public final class QwenGenerationSession implements AutoCloseable {
 
-    /// Bounds per-quantum GPU workspace while the persistent sequence retains KV and GDN state.
-    private static final int PREFILL_CHUNK_TOKENS = 512;
+    /// Default prompt tokens per prefill quantum. Bounds per-quantum GPU workspace while the
+    /// persistent sequence retains KV and GDN state.
+    public static final int DEFAULT_PREFILL_CHUNK_TOKENS = 512;
+
+    private final int prefillChunkTokens;
 
     private final QwenTokenizer tokenizer;
     private final QwenExecutionPlan plan;
@@ -64,6 +67,22 @@ public final class QwenGenerationSession implements AutoCloseable {
             long sequenceId,
             GenerationConfig config,
             Consumer<? super QwenGenerationSession> closeListener) {
+        this(tokenizer, plan, runtime, gpu, sequenceId, config, DEFAULT_PREFILL_CHUNK_TOKENS, closeListener);
+    }
+
+    /// Creates an owner-tracked session that submits at most `prefillChunkTokens` prompt tokens per
+    /// prefill quantum. Listener semantics match the constructor without a chunk size.
+    public QwenGenerationSession(
+            QwenTokenizer tokenizer,
+            QwenExecutionPlan plan,
+            EuhedralInferenceRuntime runtime,
+            ExecutionGpu gpu,
+            long sequenceId,
+            GenerationConfig config,
+            int prefillChunkTokens,
+            Consumer<? super QwenGenerationSession> closeListener) {
+        if (prefillChunkTokens <= 0) throw new IllegalArgumentException("prefillChunkTokens must be positive");
+        this.prefillChunkTokens = prefillChunkTokens;
         this.closeListener = Objects.requireNonNull(closeListener, "closeListener");
         this.tokenizer = Objects.requireNonNull(tokenizer, "tokenizer");
         this.plan = Objects.requireNonNull(plan, "plan");
@@ -81,6 +100,18 @@ public final class QwenGenerationSession implements AutoCloseable {
     /// A sampled generation terminator is included in the returned IDs but is not sent through decode.
     public List<Integer> generate(
             String prompt, int maxNewTokens, Consumer<String> output, JsonEnvelopeConstraint constraint)
+            throws InterruptedException, ExecutionException {
+        return generate(prompt, maxNewTokens, output, constraint, null);
+    }
+
+    /// Generates as [#generate(String, int, Consumer, JsonEnvelopeConstraint)] while reporting
+    /// execution boundaries to an optional timing listener. A null listener records nothing.
+    public List<Integer> generate(
+            String prompt,
+            int maxNewTokens,
+            Consumer<String> output,
+            JsonEnvelopeConstraint constraint,
+            GenerationTimingListener timing)
             throws InterruptedException, ExecutionException {
         Objects.requireNonNull(prompt, "prompt");
         Objects.requireNonNull(output, "output");
@@ -105,9 +136,10 @@ public final class QwenGenerationSession implements AutoCloseable {
             if (promptTokenIds.length == 0) {
                 throw new IllegalArgumentException("prompt must encode to at least one token");
             }
+            if (timing != null) timing.promptEncoded(System.nanoTime(), promptTokenIds.length);
 
             try {
-                return generateLocked(promptTokenIds, maxNewTokens, output, constraint);
+                return generateLocked(promptTokenIds, maxNewTokens, output, constraint, timing);
             } catch (InterruptedException | ExecutionException | RuntimeException | Error failure) {
                 if (this.sequence.terminalState() == QwenSequenceState.TerminalState.ACTIVE) {
                     try {
@@ -195,22 +227,28 @@ public final class QwenGenerationSession implements AutoCloseable {
     }
 
     private List<Integer> generateLocked(
-            int[] promptTokenIds, int maxNewTokens, Consumer<String> output, JsonEnvelopeConstraint constraint)
+            int[] promptTokenIds,
+            int maxNewTokens,
+            Consumer<String> output,
+            JsonEnvelopeConstraint constraint,
+            GenerationTimingListener timing)
             throws InterruptedException, ExecutionException {
         List<Integer> callTokenIds = new ArrayList<>();
         if (isStopRequested()) return List.of();
 
         OptionalInt nextToken = OptionalInt.empty();
-        for (int offset = 0; offset < promptTokenIds.length; offset += PREFILL_CHUNK_TOKENS) {
+        for (int offset = 0; offset < promptTokenIds.length; offset += this.prefillChunkTokens) {
             if (isStopRequested()) return List.of();
-            int end = Math.min(offset + PREFILL_CHUNK_TOKENS, promptTokenIds.length);
+            int end = Math.min(offset + this.prefillChunkTokens, promptTokenIds.length);
+            long started = timing == null ? 0L : System.nanoTime();
             QwenExecutionContext prefill = new QwenExecutionContext(
                     this.plan,
                     this.sequence,
                     QwenExecutionContext.ExecutionKind.PREFILL,
                     this.sequence.currentTokenPosition(),
                     Arrays.copyOfRange(promptTokenIds, offset, end));
-            nextToken = executeAndSelect(prefill, end == promptTokenIds.length && maxNewTokens > 0, constraint);
+            nextToken = executeAndSelect(
+                    prefill, end == promptTokenIds.length && maxNewTokens > 0, constraint, timing, started, true);
             if (isStopRequested()) return List.of();
         }
         this.promptPrefilled = true;
@@ -242,6 +280,7 @@ public final class QwenGenerationSession implements AutoCloseable {
             emit(output, this.decoder.append(tokenId));
             // Cancellation makes the session terminal; do not admit another quantum to preserve history.
             if (isStopRequested()) break;
+            long started = timing == null ? 0L : System.nanoTime();
             QwenExecutionContext decode = new QwenExecutionContext(
                     this.plan,
                     this.sequence,
@@ -249,7 +288,7 @@ public final class QwenGenerationSession implements AutoCloseable {
                     this.sequence.currentTokenPosition(),
                     new int[] {tokenId});
             // Commit the final non-terminal token for continuation without sampling beyond the limit.
-            nextToken = executeAndSelect(decode, anotherTokenAllowed, constraint);
+            nextToken = executeAndSelect(decode, anotherTokenAllowed, constraint, timing, started, false);
             if (!anotherTokenAllowed) endedNormally = !isStopRequested();
             if (isStopRequested()) break;
             if (!anotherTokenAllowed) break;
@@ -259,7 +298,12 @@ public final class QwenGenerationSession implements AutoCloseable {
     }
 
     private OptionalInt executeAndSelect(
-            QwenExecutionContext context, boolean selectToken, JsonEnvelopeConstraint constraint)
+            QwenExecutionContext context,
+            boolean selectToken,
+            JsonEnvelopeConstraint constraint,
+            GenerationTimingListener timing,
+            long startedNanos,
+            boolean prefill)
             throws InterruptedException, ExecutionException {
         QwenDeviceLogits logits = null;
         Throwable executionFailure = null;
@@ -279,13 +323,20 @@ public final class QwenGenerationSession implements AutoCloseable {
             if (outcome.status() != QwenExecutionContext.Status.SUCCESS) {
                 throw new IllegalStateException("runtime returned an unknown quantum outcome");
             }
-            if (!selectToken || isStopRequested()) return OptionalInt.empty();
+            long executedNanos = timing == null ? 0L : System.nanoTime();
+            if (!selectToken || isStopRequested()) {
+                if (timing != null)
+                    reportQuantum(timing, context, prefill, startedNanos, executedNanos, false, executedNanos, -1);
+                return OptionalInt.empty();
+            }
             logits = context.logitsOutput()
                     .orElseThrow(() -> new IllegalStateException("successful Qwen quantum produced no logits"));
             int selected = constraint == null
                     ? this.sampler.selectToken(logits, this.gpu)
                     : this.sampler.selectToken(logits, this.gpu, constraint);
             if (constraint != null) constraint.accept(selected);
+            if (timing != null)
+                reportQuantum(timing, context, prefill, startedNanos, executedNanos, true, System.nanoTime(), selected);
             return OptionalInt.of(selected);
         } catch (InterruptedException | ExecutionException | RuntimeException | Error failure) {
             executionFailure = failure;
@@ -300,6 +351,23 @@ public final class QwenGenerationSession implements AutoCloseable {
                     else throw cleanupFailure;
                 }
             }
+        }
+    }
+
+    private static void reportQuantum(
+            GenerationTimingListener timing,
+            QwenExecutionContext context,
+            boolean prefill,
+            long startedNanos,
+            long executedNanos,
+            boolean sampled,
+            long selectedNanos,
+            int selectedTokenId) {
+        if (prefill) {
+            timing.prefillQuantum(startedNanos, executedNanos, context.inputTokenCount());
+            if (sampled) timing.firstTokenSelected(selectedNanos, selectedTokenId);
+        } else {
+            timing.decodeQuantum(startedNanos, executedNanos, selectedNanos, sampled, selectedTokenId);
         }
     }
 

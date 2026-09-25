@@ -20,6 +20,7 @@ euhedral:
     # cuda-library-path: /path/to/libeuhedral_cuda.so
     # worker-cpus: 2,3            (processor IDs or inclusive ranges, e.g. 2-5,8)
     # model-id: qwen3.8-27b       (the name clients send as "model")
+    # prefill-chunk-tokens: 512  (optional; prompt tokens per prefill quantum, default 512)
     shutdown-timeout: 10s
   api:
     default-max-tokens: 4096

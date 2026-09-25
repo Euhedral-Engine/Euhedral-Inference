@@ -1,0 +1,135 @@
+package io.euhedral_execution.inference.benchmark.run;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import io.euhedral_execution.inference.benchmark.config.BenchmarkOptions;
+import io.euhedral_execution.inference.benchmark.config.Scenario;
+import io.euhedral_execution.inference.benchmark.measure.IterationTiming;
+import io.euhedral_execution.inference.benchmark.measure.Metrics;
+import io.euhedral_execution.inference.benchmark.prompt.PromptMaterial;
+import io.euhedral_execution.inference.benchmark.result.BenchmarkResult;
+import io.euhedral_execution.inference.core.InferenceRunSnapshot;
+import io.euhedral_execution.inference.core.InferenceTuning;
+import io.euhedral_execution.inference.core.sampling.GenerationConfig;
+import java.io.IOException;
+import java.time.Clock;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Consumer;
+
+/// Runs the sweep: one engine per prefill-chunk value, then for each scenario its warmup rows
+/// followed by its measured rows. Every iteration uses a fresh session and sequence.
+public final class BenchmarkRunner {
+    private BenchmarkRunner() {}
+
+    /// A loaded engine. Implementations must run [#generate] in a new session and call
+    /// `markEntry`/`markReturn` immediately around the session's generate call, outside session
+    /// creation and close.
+    public interface Target extends AutoCloseable {
+        InferenceRunSnapshot snapshot(GenerationConfig generation);
+
+        List<Integer> generate(String prompt, int maxNewTokens, GenerationConfig generation, IterationTiming timing)
+                throws Exception;
+
+        boolean isEos(int tokenId);
+
+        /// Returns `{freeBytes, totalBytes}` for the device.
+        long[] memory();
+
+        @Override
+        void close();
+    }
+
+    public interface TargetFactory {
+        Target open(InferenceTuning tuning) throws IOException;
+    }
+
+    public record Context(
+            String runId, BenchmarkResult.Fork fork, BenchmarkResult.Provenance provenance, Clock clock) {}
+
+    public static void run(
+            BenchmarkOptions options,
+            InferenceTuning baseTuning,
+            Map<Scenario, PromptMaterial> prompts,
+            TargetFactory factory,
+            Context context,
+            Consumer<BenchmarkResult> sink)
+            throws IOException, InterruptedException {
+        for (InferenceTuning tuning : options.sweep(baseTuning)) {
+            try (Target target = factory.open(tuning)) {
+                // Parse the serialized snapshot so the row holds exactly what is stored (e.g. floats as JSON numbers).
+                JsonNode engine = BenchmarkResult.JSON.readTree(
+                        target.snapshot(options.generation().toConfig()).toJson());
+                for (Scenario scenario : options.scenarios()) {
+                    PromptMaterial prompt = prompts.get(scenario);
+                    if (prompt == null) throw new IllegalStateException("no prompt prepared for " + scenario.name());
+                    for (int index = 0; index < options.warmup(); index++)
+                        sink.accept(iteration(options, tuning, scenario, prompt, target, engine, context, true, index));
+                    for (int index = 0; index < options.iterations(); index++)
+                        sink.accept(
+                                iteration(options, tuning, scenario, prompt, target, engine, context, false, index));
+                }
+            }
+        }
+    }
+
+    static BenchmarkResult iteration(
+            BenchmarkOptions options,
+            InferenceTuning tuning,
+            Scenario scenario,
+            PromptMaterial prompt,
+            Target target,
+            JsonNode engine,
+            Context context,
+            boolean warmup,
+            int index)
+            throws InterruptedException {
+        long[] before = options.gpuMemory() ? target.memory() : null;
+        var timing = new IterationTiming(
+                Math.ceilDiv(prompt.actualTokens(), tuning.prefillChunkTokens()), scenario.requestedNewTokens());
+        List<Integer> tokens = null;
+        Throwable failure = null;
+        try {
+            tokens = target.generate(
+                    prompt.text(),
+                    scenario.requestedNewTokens(),
+                    options.generation().toConfig(),
+                    timing);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw interrupted;
+        } catch (Exception executionFailure) {
+            failure = executionFailure;
+        }
+        long[] after = options.gpuMemory() ? target.memory() : null;
+        Metrics.Outcome outcome = Metrics.evaluate(scenario, timing, tokens, target::isEos, failure);
+        if (!BenchmarkResult.FAILED.equals(outcome.status())
+                && !java.util.Objects.equals(outcome.work().promptTokens(), prompt.actualTokens()))
+            outcome = new Metrics.Outcome(
+                    BenchmarkResult.FAILED, "prompt_token_count_mismatch", outcome.work(), outcome.timings(), null);
+        return new BenchmarkResult(
+                BenchmarkResult.SCHEMA,
+                BenchmarkResult.SCHEMA_VERSION,
+                BenchmarkResult.IMPLEMENTATION,
+                context.provenance(),
+                context.runId(),
+                context.fork(),
+                context.clock().instant().toString(),
+                new BenchmarkResult.ScenarioRecord(
+                        scenario.name(),
+                        scenario.kind().label(),
+                        scenario.targetPromptTokens(),
+                        scenario.requestedNewTokens(),
+                        prompt.generator(),
+                        options.promptSeed(),
+                        prompt.sha256()),
+                warmup,
+                index,
+                outcome.status(),
+                outcome.reason(),
+                outcome.work(),
+                outcome.timings(),
+                outcome.throughput(),
+                engine,
+                before == null ? null : new BenchmarkResult.GpuMemory(before[0], after[0], before[1]));
+    }
+}

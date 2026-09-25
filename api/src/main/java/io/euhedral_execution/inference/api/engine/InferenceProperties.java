@@ -1,6 +1,7 @@
 package io.euhedral_execution.inference.api.engine;
 
 import io.euhedral_execution.inference.core.InferenceConfig;
+import io.euhedral_execution.inference.core.InferenceTuning;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.BitSet;
@@ -11,6 +12,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 ///
 /// `workerCpus` lists processor IDs accepted by Euhedral, not a worker count: comma-separated IDs and
 /// inclusive ranges such as `2,3,8-11`. `modelId` is the public name clients send as `model`.
+/// `prefillChunkTokens` optionally overrides the core prefill chunk size; unset keeps the core default.
 @ConfigurationProperties("euhedral.inference")
 public record InferenceProperties(
         Path artifactPath,
@@ -18,7 +20,8 @@ public record InferenceProperties(
         Path cudaLibraryPath,
         String workerCpus,
         @DefaultValue("10s") Duration shutdownTimeout,
-        String modelId) {
+        String modelId,
+        Integer prefillChunkTokens) {
 
     public InferenceProperties {
         require(artifactPath, "artifact-path");
@@ -29,16 +32,16 @@ public record InferenceProperties(
         require(modelId, "model-id");
         if (modelId.isBlank()) throw new IllegalArgumentException("euhedral.inference.model-id must not be blank");
         parseCpus(workerCpus);
+        if (prefillChunkTokens != null && prefillChunkTokens <= 0)
+            throw new IllegalArgumentException("euhedral.inference.prefill-chunk-tokens must be positive");
     }
 
     /// Converts to the core record, which performs its own lifetime and CPU-set validation.
     public InferenceConfig toInferenceConfig() {
+        InferenceTuning tuning = InferenceTuning.defaults(parseCpus(this.workerCpus));
+        if (this.prefillChunkTokens != null) tuning = tuning.withPrefillChunkTokens(this.prefillChunkTokens);
         return new InferenceConfig(
-                this.artifactPath,
-                this.tokenizerDirectory,
-                this.cudaLibraryPath,
-                parseCpus(this.workerCpus),
-                this.shutdownTimeout);
+                this.artifactPath, this.tokenizerDirectory, this.cudaLibraryPath, tuning, this.shutdownTimeout);
     }
 
     static BitSet parseCpus(String specification) {

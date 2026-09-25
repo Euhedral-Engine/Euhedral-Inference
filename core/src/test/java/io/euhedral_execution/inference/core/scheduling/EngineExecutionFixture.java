@@ -47,6 +47,12 @@ public final class EngineExecutionFixture {
             this.vocabularySize = vocabularySize;
         }
 
+        /// Scripts sampled token IDs in order; the last ID repeats once the script is exhausted.
+        public void selectTokens(int... tokenIds) {
+            this.selectedTokenIds = tokenIds.clone();
+            this.sampleIndex = 0;
+        }
+
         public void afterEmbedding(Runnable callback) {
             this.afterEmbedding = callback;
         }

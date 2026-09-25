@@ -10,6 +10,7 @@ This is a multi-module Gradle project:
 | ------ | ------- |
 | `core` | Core inference engine: model loading, execution, and tensor handling. |
 | `api`  | Spring Boot OpenAI-compatible HTTP API. Depends on `core`. |
+| `benchmark` | End-to-end benchmark harness (not packaged with the API). Depends on `core`. |
 
 ## Requirements
 
@@ -103,6 +104,18 @@ This is a host-specific alternative to NVIDIA Container Toolkit, not an image-bu
 
 ```bash
 ./gradlew test
+```
+
+## Benchmarking
+
+The `benchmark` module measures the engine end to end: tokenizer, Euhedral lattice, and CUDA, with a
+fresh session per iteration. It writes versioned JSON results. See [docs/BENCHMARKING.md](docs/BENCHMARKING.md)
+for the build → test → baseline → profile → change → rerun workflow, the configuration file, and
+metric definitions.
+
+```bash
+./gradlew :benchmark:run --args="run benchmark/configs/baseline.json --validate-only"
+./gradlew :benchmark:run --args="run benchmark/configs/baseline.json"
 ```
 
 ## Formatting

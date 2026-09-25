@@ -23,3 +23,6 @@ native/zig-out/
 # Python tooling
 tools/__pycache__/
 __pycache__/
+
+# Retained benchmark results (keep, compare, or archive deliberately)
+/benchmark-results/
