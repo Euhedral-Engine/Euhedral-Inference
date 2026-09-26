@@ -27,6 +27,7 @@ public final class BenchmarkMain {
             usage:
               run CONFIG.json [--fork-id ID] [--validate-only]
               q3 CONFIG.json [MATRIX ROWS]
+              q45 CONFIG.json [MATRIX ROWS]
               import --input FILE --implementation LABEL --output FILE [--note TEXT] [--overwrite|--append]
 
             CONFIG.json requires "artifact", "tokenizer", and "cudaLibrary"; see docs/BENCHMARKING.md.
@@ -54,6 +55,15 @@ public final class BenchmarkMain {
                     if (rest.size() != 1 && rest.size() != 3)
                         throw new IllegalArgumentException("q3 needs CONFIG.json [MATRIX ROWS]");
                     io.euhedral_execution.inference.benchmark.run.Q3Microbenchmark.run(
+                            BenchmarkOptions.load(Path.of(rest.getFirst()), Instant.now()),
+                            rest.size() == 3 ? rest.get(1) : null,
+                            rest.size() == 3 ? Integer.valueOf(rest.get(2)) : null);
+                    yield 0;
+                }
+                case "q45" -> {
+                    if (rest.size() != 1 && rest.size() != 3)
+                        throw new IllegalArgumentException("q45 needs CONFIG.json [MATRIX ROWS]");
+                    io.euhedral_execution.inference.benchmark.run.Q45Microbenchmark.run(
                             BenchmarkOptions.load(Path.of(rest.getFirst()), Instant.now()),
                             rest.size() == 3 ? rest.get(1) : null,
                             rest.size() == 3 ? Integer.valueOf(rest.get(2)) : null);
