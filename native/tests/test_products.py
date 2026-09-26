@@ -81,7 +81,9 @@ class NativeProductsTest(unittest.TestCase):
         with zipfile.ZipFile(archive) as packaged:
             members = {name for name in packaged.namelist() if not name.endswith("/")}
         products = json.loads(MANIFEST.read_text(encoding="utf-8"))["products"]
-        sources = {path.name for path in (ROOT / "native" / "src").glob("*.cu")}
+        sources = {path.relative_to(ROOT / "native" / "src").as_posix()
+                   for path in (ROOT / "native" / "src").rglob("*")
+                   if path.is_file() and path.suffix in {".cu", ".cuh"}}
         expected = {
             f"{product['id']}/lib/{product['filename']}" for product in products
         } | {
@@ -93,7 +95,9 @@ class NativeProductsTest(unittest.TestCase):
     def test_installed_products_match_manifest_and_binary_targets(self):
         products = json.loads(MANIFEST.read_text(encoding="utf-8"))["products"]
         self.assertEqual({item["id"] for item in products}, {"linux-x64", "windows-x64"})
-        sources = {path.name for path in (ROOT / "native" / "src").glob("*.cu")}
+        sources = {path.relative_to(ROOT / "native" / "src").as_posix()
+                   for path in (ROOT / "native" / "src").rglob("*")
+                   if path.is_file() and path.suffix in {".cu", ".cuh"}}
         self.assertTrue(sources)
         for product in products:
             prefix = OUTPUT / product["id"]
@@ -114,7 +118,8 @@ class NativeProductsTest(unittest.TestCase):
                     imports = pe_imports(binary)
                     self.assertTrue({"cudart64_13.dll", "nvrtc64_130_0.dll", "nvcuda.dll"} <= imports)
                     self.assertFalse(any(name.startswith("libcuda.so") for name in imports))
-                installed = {path.name for path in (prefix / "share" / "euhedral_cuda").glob("*.cu")}
+                installed = {path.relative_to(prefix / "share" / "euhedral_cuda").as_posix()
+                             for path in (prefix / "share" / "euhedral_cuda").rglob("*") if path.is_file()}
                 self.assertEqual(installed, sources)
 
 
