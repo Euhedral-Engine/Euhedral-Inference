@@ -86,6 +86,16 @@ pub fn build(b: *std.Build) void {
     b.installFile("src/q3_embedding.cu", "share/euhedral_cuda/q3_embedding.cu");
     b.installFile("src/rms_norm_bf16.cu", "share/euhedral_cuda/rms_norm_bf16.cu");
     b.installFile("src/q3_linear_bf16.cu", "share/euhedral_cuda/q3_linear_bf16.cu");
+    const q3_sources = [_][]const u8{
+        "kernels.cu", "numeric.cuh", "layout.cuh",
+        "primitives/packed_load.cuh", "primitives/activation.cuh",
+        "primitives/decode.cuh", "primitives/staging.cuh", "primitives/mma.cuh",
+        "primitives/accumulation.cuh", "primitives/writeback.cuh",
+        "strategies/scalar.cuh", "strategies/decode.cuh", "strategies/prefill.cuh",
+    };
+    for (q3_sources) |source| {
+        b.installFile(b.fmt("src/q3/{s}", .{source}), b.fmt("share/euhedral_cuda/q3/{s}", .{source}));
+    }
     b.installFile("src/qwen_layer_linear.cu", "share/euhedral_cuda/qwen_layer_linear.cu");
     b.installFile("src/q45_linear_bf16.cu", "share/euhedral_cuda/q45_linear_bf16.cu");
     b.installFile("src/qwen_gdn_ops.cu", "share/euhedral_cuda/qwen_gdn_ops.cu");

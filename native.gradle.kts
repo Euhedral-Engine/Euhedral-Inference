@@ -345,7 +345,7 @@ tasks.register<Zip>("nativePackage") {
         val product = products.single { it["id"] == id }
         from(nativeRoot.map { it.dir(id) }) {
             into(id)
-            include("lib/${product["filename"]}", "share/euhedral_cuda/*.cu")
+            include("lib/${product["filename"]}", "share/euhedral_cuda/**/*.cu", "share/euhedral_cuda/**/*.cuh")
         }
     }
 }
@@ -354,13 +354,16 @@ tasks.register("nativeVerify") {
     group = "verification"
     dependsOn(tasks.named("nativeBuild"))
     doLast {
-        val sources = fileTree("native/src") { include("*.cu") }.files.map { it.name }.toSet()
+        val sourceRoot = file("native/src")
+        val sources = fileTree(sourceRoot) { include("**/*.cu", "**/*.cuh") }
+            .files.map { it.relativeTo(sourceRoot).invariantSeparatorsPath }.toSet()
         for (product in products) {
             val prefix = nativeRoot.get().dir(product["id"] as String)
             val binary = prefix.file("lib/${product["filename"]}").asFile
             check(binary.isFile) { "Missing native product $binary" }
-            val installed = fileTree(prefix.dir("share/euhedral_cuda")) { include("*.cu") }
-                .files.map { it.name }.toSet()
+            val installedRoot = prefix.dir("share/euhedral_cuda").asFile
+            val installed = fileTree(installedRoot) { include("**/*.cu", "**/*.cuh") }
+                .files.map { it.relativeTo(installedRoot).invariantSeparatorsPath }.toSet()
             check(sources == installed) { "Missing NVRTC sources for ${product["id"]}: ${sources - installed}" }
             val signature = binary.inputStream().use { it.readNBytes(2) }
             check(signature.contentEquals(if (product["hostOs"] == "windows") byteArrayOf(77, 90)

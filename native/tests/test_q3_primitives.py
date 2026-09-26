@@ -1,10 +1,8 @@
-"""Boundary tests for the Q3 kernel primitives in native/src/q3_linear_bf16.cu.
+"""Boundary tests for the Q3 module in native/src/q3/.
 
-Each test appends a small probe kernel to the production source and compiles
-the combined translation unit with NVRTC, so the probes exercise the exact
-primitives the shipped kernels use. Tests skip when the pinned NVRTC runtime
-(build/cuda-dev/<product>/runtime) or a CUDA device is unavailable, e.g. on
-hosted CI runners.
+Each test includes the production module and appends a small probe kernel, so
+probes exercise the same primitives as the shipped entry points. Tests skip
+when the pinned NVRTC runtime or CUDA device is unavailable.
 """
 
 import contextlib
@@ -128,7 +126,7 @@ def _check(status, what):
 class Gpu:
     """Owns one primary-context retain and one module for the test class."""
 
-    def __init__(self, source):
+    def __init__(self, source, include_dir=None):
         nv, cu = NVRTC, CUDA
         self.create = _bind(nv, "nvrtcCreateProgram", [C.POINTER(P), C.c_char_p, C.c_char_p, I, P, P])
         self.compile = _bind(nv, "nvrtcCompileProgram", [P, I, C.POINTER(C.c_char_p)])
@@ -160,17 +158,17 @@ class Gpu:
         self.module = P()
         try:
             _check(self.set_current(self.context), "cuCtxSetCurrent")
-            _check(self.load(C.byref(self.module), self._ptx(source), 0, None, None), "cuModuleLoadDataEx")
+            _check(self.load(C.byref(self.module), self._ptx(source, include_dir), 0, None, None), "cuModuleLoadDataEx")
         except BaseException:
             self.close()
             raise
 
-    def _ptx(self, source):
+    def _ptx(self, source, include_dir):
         program = P()
         _check(self.create(C.byref(program), source, b"q3_linear_bf16_probe.cu", 0, None, None), "nvrtcCreate")
         try:
             options = [b"--std=c++14", b"--gpu-architecture=compute_90", b"-I" + str(INCLUDE).encode(),
-                       b"-DCOMMA=,"]
+                       b"-DCOMMA=,", b"-I" + str(include_dir or (ROOT / "native/src")).encode()]
             status = self.compile(program, len(options), (C.c_char_p * len(options))(*options))
             if status:
                 size = C.c_size_t()
@@ -260,7 +258,7 @@ def f32(value):
 class Q3PrimitiveTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.gpu = Gpu(SOURCE.read_bytes() + PROBES.encode())
+        cls.gpu = Gpu(b'#include "q3/kernels.cu"\n' + PROBES.encode())
         cls.rng = random.Random(0x0513)
 
     @classmethod
