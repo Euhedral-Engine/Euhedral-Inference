@@ -198,3 +198,73 @@ extern "C" __global__ __launch_bounds__(128) void euhedral_q3_prefill(
         if (r < rows && n < out_features) output[(unsigned long long)r * out_features + n] = float_to_bf16(result[i]);
     }
 }
+
+// Double the row tile for the large Q3 MLP projections. Each warp holds two
+// FP32 accumulators, so a packed/dequantized weight tile is reused across 64
+// token rows rather than 32. The 32-row kernel above remains the fallback.
+extern "C" __global__ __launch_bounds__(128) void euhedral_q3_prefill_64(
+        const unsigned short* input, const unsigned char* weights, unsigned short* output,
+        unsigned int rows, unsigned int in_features, unsigned int out_features,
+        unsigned long long scale_offset) {
+    using namespace nvcuda;
+    __shared__ __align__(32) __nv_bfloat16 a[64 * 64];
+    __shared__ __align__(32) __nv_bfloat16 b_hi[32 * 64];
+    __shared__ __align__(32) __nv_bfloat16 b_lo[32 * 64];
+    __shared__ __align__(32) float result[64 * 32];
+    unsigned int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    unsigned int output_tiles = (out_features + 31u) / 32u;
+    unsigned int row_start = (blockIdx.x / output_tiles) * 64, out_start = (blockIdx.x % output_tiles) * 32;
+    unsigned int groups = ((in_features + 127u) / 128u) * 2u;
+    const unsigned short* scales = (const unsigned short*)(weights + scale_offset);
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc0, acc1;
+    wmma::fill_fragment(acc0, 0.0f);
+    wmma::fill_fragment(acc1, 0.0f);
+    for (unsigned int base = 0; base < in_features; base += 64) {
+        for (unsigned int i = threadIdx.x; i < 64 * 64; i += 128) {
+            unsigned int r = row_start + i / 64, k = base + i % 64;
+            a[i] = __float2bfloat16(r < rows && k < in_features
+                    ? bf16_to_float(input[(unsigned long long)r * in_features + k]) : 0.0f);
+        }
+        for (unsigned int col = warp; col < 32; col += 4) {
+            unsigned int codes = 0;
+            float scale = 0.0f;
+            if (out_start + col < out_features) {
+                unsigned long long g = (unsigned long long)(out_start + col) * groups + base / 64;
+                codes = q3_pair(weights, g, lane);
+                scale = fp16_to_float(__shfl_sync(0xffffffffu, lane == 0 ? (unsigned int)scales[g] : 0u, 0));
+            }
+            #pragma unroll
+            for (int p = 0; p < 2; p++) {
+                int code = (codes >> (p * 3)) & 7; code -= (code & 4) ? 8 : 0;
+                float weight = (float)code * scale;
+                unsigned int i = col * 64 + lane * 2 + p;
+                b_hi[i] = __float2bfloat16(weight);
+                b_lo[i] = __float2bfloat16(weight - __bfloat162float(b_hi[i]));
+            }
+        }
+        __syncthreads();
+        #pragma unroll
+        for (unsigned int k = 0; k < 64; k += 16) {
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> af0, af1;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> bf;
+            wmma::load_matrix_sync(af0, a + (warp / 2) * 16 * 64 + k, 64);
+            wmma::load_matrix_sync(af1, a + ((warp / 2) * 16 + 32) * 64 + k, 64);
+            wmma::load_matrix_sync(bf, b_hi + (warp % 2) * 16 * 64 + k, 64);
+            wmma::mma_sync(acc0, af0, bf, acc0);
+            wmma::mma_sync(acc1, af1, bf, acc1);
+            wmma::load_matrix_sync(bf, b_lo + (warp % 2) * 16 * 64 + k, 64);
+            wmma::mma_sync(acc0, af0, bf, acc0);
+            wmma::mma_sync(acc1, af1, bf, acc1);
+        }
+        __syncthreads();
+    }
+    wmma::store_matrix_sync(result + (warp / 2) * 16 * 32 + (warp % 2) * 16,
+            acc0, 32, wmma::mem_row_major);
+    wmma::store_matrix_sync(result + ((warp / 2) * 16 + 32) * 32 + (warp % 2) * 16,
+            acc1, 32, wmma::mem_row_major);
+    __syncthreads();
+    for (unsigned int i = threadIdx.x; i < 64 * 32; i += 128) {
+        unsigned int r = row_start + i / 32, n = out_start + i % 32;
+        if (r < rows && n < out_features) output[(unsigned long long)r * out_features + n] = float_to_bf16(result[i]);
+    }
+}

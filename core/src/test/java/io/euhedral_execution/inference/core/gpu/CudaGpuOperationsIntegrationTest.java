@@ -69,6 +69,58 @@ class CudaGpuOperationsIntegrationTest {
     }
 
     @Test
+    void sixtyFourRowQ3PrefillMatchesScalarAtRowAndOutputEdges() throws Throwable {
+        Path library = Path.of(System.getProperty("euhedral.cuda.library"));
+        try (CudaGpuMemory gpu = new CudaGpuMemory(library);
+                Arena arena = Arena.ofConfined()) {
+            var symbols = java.lang.foreign.SymbolLookup.libraryLookup(library, arena);
+            var symbol = symbols.find("euhedral_cuda_linear_q3_prefill_64_bf16");
+            assertTrue(symbol.isPresent(), "missing independent 64-row Q3 prefill path");
+            var kernel = java.lang.foreign.Linker.nativeLinker()
+                    .downcallHandle(
+                            symbol.orElseThrow(),
+                            java.lang.foreign.FunctionDescriptor.of(
+                                    java.lang.foreign.ValueLayout.JAVA_INT,
+                                    java.lang.foreign.ValueLayout.ADDRESS,
+                                    java.lang.foreign.ValueLayout.ADDRESS,
+                                    java.lang.foreign.ValueLayout.ADDRESS,
+                                    java.lang.foreign.ValueLayout.JAVA_INT,
+                                    java.lang.foreign.ValueLayout.JAVA_INT,
+                                    java.lang.foreign.ValueLayout.JAVA_INT,
+                                    java.lang.foreign.ValueLayout.JAVA_LONG));
+            for (int width : new int[] {65, 192}) {
+                for (int rows : new int[] {31, 33, 63, 64, 65}) {
+                    for (int outputs : new int[] {35, 65}) {
+                        byte[] packed = q3Weights(outputs, width);
+                        short[] input = new short[rows * width];
+                        for (int i = 0; i < input.length; i++) input[i] = floatToBf16((i % 23 - 11) * 0.125f);
+                        long x = upload(gpu, arena, input), w = upload(gpu, arena, packed);
+                        long y = gpu.allocate((long) rows * outputs * Short.BYTES);
+                        try {
+                            gpu.linearQ3Bf16(x, w, y, rows, width, outputs, packed.length, Q3DispatchMode.SCALAR);
+                            short[] expected = download(gpu, arena, y, rows * outputs);
+                            int status = (int) kernel.invokeExact(
+                                    MemorySegment.ofAddress(x),
+                                    MemorySegment.ofAddress(w),
+                                    MemorySegment.ofAddress(y),
+                                    rows,
+                                    width,
+                                    outputs,
+                                    (long) packed.length);
+                            assertEquals(0, status, "rows=" + rows + " outputs=" + outputs);
+                            assertBf16Equals(expected, download(gpu, arena, y, rows * outputs), 0.02f);
+                        } finally {
+                            gpu.free(y);
+                            gpu.free(w);
+                            gpu.free(x);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     void specializedQ3PathsPreserveScaleEdgesAndPartialK() {
         try (var gpu = new CudaGpuMemory(Path.of(System.getProperty("euhedral.cuda.library")));
                 var arena = Arena.ofConfined()) {
