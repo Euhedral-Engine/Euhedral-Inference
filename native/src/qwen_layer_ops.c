@@ -3,6 +3,8 @@
 #include <cuda_runtime_api.h>
 #include <math.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -16,14 +18,21 @@ static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
 static pthread_once_t once = PTHREAD_ONCE_INIT;
 #endif
 static int quantized_anchor;
+static int q45_anchor;
 static int gdn_anchor;
 static int elementwise_anchor;
 static int attention_anchor;
 static CUmodule quantized_module;
+static CUmodule q45_module;
 static CUmodule gdn_module;
 static CUmodule elementwise_module;
 static CUmodule attention_module;
 static CUfunction linear_quantized;
+static CUfunction q4_decode;
+static CUfunction q5_decode;
+static CUfunction q4_prefill;
+static CUfunction q5_prefill;
+static int q45_status = EUHEDRAL_CUDA_KERNEL_UNAVAILABLE;
 static CUfunction linear_bf16_to_float;
 static CUfunction gdn_control;
 static CUfunction gdn_convolution;
@@ -46,6 +55,15 @@ static void initialize(void) {
     if (init_status != EUHEDRAL_CUDA_SUCCESS) return;
     CUresult status = get_function(quantized_module, &linear_bf16_to_float, "euhedral_linear_bf16_to_float");
     if (status != CUDA_SUCCESS) { init_status = (int)status; return; }
+
+    q45_status = euhedral_cuda_load_kernel(
+            &q45_anchor, "q45_linear_bf16.cu", "euhedral_q4_decode", &q45_module, &q4_decode);
+    if (q45_status == EUHEDRAL_CUDA_SUCCESS) {
+        status = get_function(q45_module, &q5_decode, "euhedral_q5_decode");
+        if (status == CUDA_SUCCESS) status = get_function(q45_module, &q4_prefill, "euhedral_q4_prefill");
+        if (status == CUDA_SUCCESS) status = get_function(q45_module, &q5_prefill, "euhedral_q5_prefill");
+        if (status != CUDA_SUCCESS) q45_status = (int)status;
+    }
 
     init_status = euhedral_cuda_load_kernel(
             &gdn_anchor, "qwen_gdn_ops.cu", "euhedral_gdn_control_fp32", &gdn_module, &gdn_control);
@@ -152,7 +170,33 @@ int euhedral_cuda_linear_quantized_bf16(
     CUdeviceptr output = (CUdeviceptr)(uintptr_t)device_output;
     uint32_t rows_arg = rows, in_arg = in_features, out_arg = out_features, bits_arg = bits;
     void* parameters[] = {&input, &weights, &output, &rows_arg, &in_arg, &out_arg, &bits_arg};
-    return launch_and_synchronize(linear_quantized, (uint32_t)count, 128, parameters);
+    const char* mode = getenv("EUHEDRAL_Q45_DISPATCH");
+    if (mode != NULL && strcmp(mode, "SCALAR") == 0)
+        return launch_and_synchronize(linear_quantized, (uint32_t)count, 128, parameters);
+    int use_decode;
+    if (mode != NULL && strcmp(mode, "DECODE") == 0) use_decode = 1;
+    else if (mode != NULL && strcmp(mode, "PREFILL") == 0) use_decode = 0;
+    else if (mode == NULL || strcmp(mode, "AUTO") == 0) {
+        const char* threshold_string = getenv(bits == 4 ? "EUHEDRAL_Q4_DECODE_MAX_ROWS" : "EUHEDRAL_Q5_DECODE_MAX_ROWS");
+        uint32_t threshold = bits == 4 ? 9 : 4;
+        if (threshold_string != NULL) {
+            char* end;
+            unsigned long parsed = strtoul(threshold_string, &end, 10);
+            if (*threshold_string == '\0' || *threshold_string == '-' || *end != '\0' || parsed > UINT32_MAX)
+                return EUHEDRAL_CUDA_INVALID_ARGUMENT;
+            threshold = (uint32_t)parsed;
+        }
+        use_decode = rows <= threshold;
+    } else return EUHEDRAL_CUDA_INVALID_ARGUMENT;
+    if (q45_status != EUHEDRAL_CUDA_SUCCESS) return q45_status;
+    CUfunction function = bits == 4 ? (use_decode ? q4_decode : q4_prefill)
+                                    : (use_decode ? q5_decode : q5_prefill);
+    uint64_t grid64 = use_decode ? (uint64_t)rows * (((uint64_t)out_features + 7u) / 8u)
+                                 : (((uint64_t)rows + 31u) / 32u) * (((uint64_t)out_features + 31u) / 32u);
+    if (grid64 > 2147483647u) return EUHEDRAL_CUDA_SIZE_OVERFLOW;
+    uint32_t grid = (uint32_t)grid64;
+    void* optimized_parameters[] = {&input, &weights, &output, &rows_arg, &in_arg, &out_arg};
+    return launch_and_synchronize(function, grid, 128, optimized_parameters);
 }
 
 int euhedral_cuda_linear_bf16_to_float(

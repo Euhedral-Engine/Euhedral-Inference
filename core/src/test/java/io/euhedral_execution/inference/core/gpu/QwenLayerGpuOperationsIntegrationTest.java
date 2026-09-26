@@ -154,6 +154,42 @@ class QwenLayerGpuOperationsIntegrationTest {
     }
 
     @Test
+    void q4AndQ5TiledLinearMatchIndependentCpuOnPartialTiles() throws Exception {
+        try (CudaGpuMemory gpu = new CudaGpuMemory(cudaLibrary());
+                Arena arena = Arena.ofConfined()) {
+            for (int bits : new int[] {4, 5}) {
+                for (int rows : new int[] {1, 4, 8, 9, 16, 32, 33, 256}) {
+                    int width = 128;
+                    int outputs = 37;
+                    short[] input = new short[rows * width];
+                    for (int i = 0; i < input.length; i++) input[i] = floatToBf16((i % 23 - 11) * 0.0625f);
+                    byte[] weights = quantizedWeights(outputs, width, bits);
+                    long inputAddress = upload(gpu, arena, input);
+                    long weightAddress = upload(gpu, arena, weights);
+                    long outputAddress = gpu.allocate((long) rows * outputs * Short.BYTES);
+                    try {
+                        if (bits == 4) {
+                            gpu.linearQ4Bf16(
+                                    inputAddress, weightAddress, outputAddress, rows, width, outputs, weights.length);
+                        } else {
+                            gpu.linearQ5Bf16(
+                                    inputAddress, weightAddress, outputAddress, rows, width, outputs, weights.length);
+                        }
+                        assertBf16Equals(
+                                quantizedLinearReference(input, weights, rows, width, outputs, bits),
+                                download(gpu, arena, outputAddress, rows * outputs),
+                                0.025f);
+                    } finally {
+                        gpu.free(outputAddress);
+                        gpu.free(weightAddress);
+                        gpu.free(inputAddress);
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     void bf16LinearPreservesFp32ControlProjectionResults() throws Exception {
         int rows = 2;
         int width = 128;

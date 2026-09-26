@@ -169,6 +169,35 @@ replace full-model numerical qualification or independent JVM forks of `run`. Ke
 comparisons in the same `gpuExecutionMode`, including the existing per-worker persistent-stream
 mode when comparing against the async baseline.
 
+## Packed Q4/Q5 operator screens
+
+The `q45 CONFIG.json [MATRIX ROWS]` command uses real packed weights from the first GDN and
+attention layers. Matrix names are `gdn-q4`, `gdn-q5`, `attention-q4`, and `attention-q5`.
+Without a selector it sweeps 1, 2, 4, 8, 9, 12, 16, 32, 256, and 512 rows. Set
+`EUHEDRAL_Q45_DISPATCH` to `SCALAR`, `DECODE`, or `PREFILL` in a separate JVM for each
+forced path. Each path writes its own JSONL results and per-case raw BF16 output files;
+compare the latter against the forced scalar run before accepting timings. Output files must
+not exist before a run. The screen clears 128 MiB of device memory outside each timed
+synchronous native call. It does not substitute for full-model or end-to-end validation.
+For example, after building the benchmark distribution and writing a configuration whose
+`output` points to a new `screen-scalar.jsonl` file:
+
+```sh
+EUHEDRAL_Q45_DISPATCH=SCALAR \
+  benchmark/build/install/euhedral-inference-benchmark/bin/euhedral-inference-benchmark \
+  q45 screen-scalar.json gdn-q4 32
+```
+
+Use separate configuration/output paths for `DECODE` and `PREFILL`; archive and compare
+all three sets of raw BF16 files, not just their timings.
+
+Normal inference uses `AUTO` (also the default when the variable is unset): Q4 selects decode
+through 9 rows and Q5 through 4 rows, then uses tiled prefill. The optional environment
+variables `EUHEDRAL_Q4_DECODE_MAX_ROWS` and `EUHEDRAL_Q5_DECODE_MAX_ROWS` override those
+thresholds independently. Archive the exact environment alongside any benchmark results;
+these native experiment controls are not fields in the engine snapshot. `SCALAR` retains the
+original packed-weight reference kernel, without changing the persistent Q4/Q5 layout.
+
 ## Prompts
 
 Prompts are raw text, not chat-templated. Words are drawn from a fixed list

@@ -87,6 +87,7 @@ pub fn build(b: *std.Build) void {
     b.installFile("src/rms_norm_bf16.cu", "share/euhedral_cuda/rms_norm_bf16.cu");
     b.installFile("src/q3_linear_bf16.cu", "share/euhedral_cuda/q3_linear_bf16.cu");
     b.installFile("src/qwen_layer_linear.cu", "share/euhedral_cuda/qwen_layer_linear.cu");
+    b.installFile("src/q45_linear_bf16.cu", "share/euhedral_cuda/q45_linear_bf16.cu");
     b.installFile("src/qwen_gdn_ops.cu", "share/euhedral_cuda/qwen_gdn_ops.cu");
     b.installFile("src/qwen_elementwise.cu", "share/euhedral_cuda/qwen_elementwise.cu");
     b.installFile("src/qwen_attention_ops.cu", "share/euhedral_cuda/qwen_attention_ops.cu");
