@@ -126,7 +126,7 @@ def _check(status, what):
 class Gpu:
     """Owns one primary-context retain and one module for the test class."""
 
-    def __init__(self, source, include_dir=None):
+    def __init__(self, source, include_dir=None, cpp_std=14):
         nv, cu = NVRTC, CUDA
         self.create = _bind(nv, "nvrtcCreateProgram", [C.POINTER(P), C.c_char_p, C.c_char_p, I, P, P])
         self.compile = _bind(nv, "nvrtcCompileProgram", [P, I, C.POINTER(C.c_char_p)])
@@ -158,17 +158,18 @@ class Gpu:
         self.module = P()
         try:
             _check(self.set_current(self.context), "cuCtxSetCurrent")
-            _check(self.load(C.byref(self.module), self._ptx(source, include_dir), 0, None, None), "cuModuleLoadDataEx")
+            _check(self.load(C.byref(self.module), self._ptx(source, include_dir, cpp_std), 0, None, None), "cuModuleLoadDataEx")
         except BaseException:
             self.close()
             raise
 
-    def _ptx(self, source, include_dir):
+    def _ptx(self, source, include_dir, cpp_std):
         program = P()
         _check(self.create(C.byref(program), source, b"q3_linear_bf16_probe.cu", 0, None, None), "nvrtcCreate")
         try:
-            options = [b"--std=c++14", b"--gpu-architecture=compute_90", b"-I" + str(INCLUDE).encode(),
-                       b"-DCOMMA=,", b"-I" + str(include_dir or (ROOT / "native/src")).encode()]
+            options = [f"--std=c++{cpp_std}".encode(), b"--gpu-architecture=compute_90", b"-I" + str(INCLUDE).encode(),
+                       b"-DCOMMA=,", b"-I" + str(include_dir or (ROOT / "native/src")).encode(),
+                       b"-I" + str(INCLUDE / "cccl").encode()]
             status = self.compile(program, len(options), (C.c_char_p * len(options))(*options))
             if status:
                 size = C.c_size_t()
@@ -185,11 +186,16 @@ class Gpu:
             self.destroy(C.byref(program))
 
     def close(self):
-        if self.module.value:
-            self.unload(self.module)
-            self.module = P()
-        self.set_current(None)
-        self.release(0)
+        try:
+            _check(self.set_current(self.context), "cuCtxSetCurrent for cleanup")
+            if self.module.value:
+                _check(self.unload(self.module), "cuModuleUnload")
+                self.module = P()
+        finally:
+            try:
+                _check(self.set_current(None), "cuCtxSetCurrent clear")
+            finally:
+                _check(self.release(0), "cuDevicePrimaryCtxRelease")
 
     def upload(self, data):
         ptr = self._allocate(len(data))
@@ -220,13 +226,15 @@ class Gpu:
         _check(self.dtoh(buffer, ptr, size), "cuMemcpyDtoH")
         return buffer.raw
 
-    def launch(self, name, grid, arguments):
+    def launch(self, name, grid, arguments, synchronize=True):
         function = P()
         _check(self.function(C.byref(function), self.module, name.encode()), name)
         params = (P * len(arguments))(*[C.cast(C.pointer(value), P) for value in arguments])
-        _check(self.launch_kernel(function, grid, 1, 1, 128 if name != "probe_stripe_codes"
+        grid_x, grid_y = grid if isinstance(grid, tuple) else (grid, 1)
+        _check(self.launch_kernel(function, grid_x, grid_y, 1, 128 if name != "probe_stripe_codes"
                                   and name != "probe_pair_codes" else 32, 1, 1, 0, None, params, None), name)
-        _check(self.sync(), name)
+        if synchronize:
+            _check(self.sync(), name)
 
 
 def reference_code(data, group, index):
