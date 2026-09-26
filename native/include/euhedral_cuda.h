@@ -88,6 +88,9 @@ EUHEDRAL_CUDA_EXPORT int euhedral_cuda_linear_q3_decode_bf16(
 EUHEDRAL_CUDA_EXPORT int euhedral_cuda_linear_q3_prefill_bf16(
         const void* input, const void* weights, void* output,
         uint32_t rows, uint32_t in_features, uint32_t out_features, uint64_t weights_byte_size);
+EUHEDRAL_CUDA_EXPORT int euhedral_cuda_linear_q3_prefill_64_bf16(
+        const void* input, const void* weights, void* output,
+        uint32_t rows, uint32_t in_features, uint32_t out_features, uint64_t weights_byte_size);
 
 EUHEDRAL_CUDA_EXPORT int euhedral_cuda_linear_quantized_bf16(
         const void* device_input,

@@ -16,7 +16,7 @@ static pthread_once_t once = PTHREAD_ONCE_INIT;
 #endif
 static CUmodule module;
 static CUfunction function;
-static CUfunction decode1, decode2, decode4, prefill;
+static CUfunction decode1, decode2, decode4, prefill, prefill64;
 static int init_status = EUHEDRAL_CUDA_KERNEL_UNAVAILABLE;
 static CUfunction optional_kernel(const char* name) {
     CUfunction loaded = NULL;
@@ -29,6 +29,7 @@ static void initialize(void) {
     decode2 = optional_kernel("euhedral_q3_decode_2");
     decode4 = optional_kernel("euhedral_q3_decode_4");
     prefill = optional_kernel("euhedral_q3_prefill");
+    prefill64 = optional_kernel("euhedral_q3_prefill_64");
 }
 #ifdef _WIN32
 static BOOL CALLBACK initialize_once(PINIT_ONCE state, PVOID parameter, PVOID* context) {
@@ -53,7 +54,13 @@ static int linear_q3(const void* input, const void* weights, void* output,
     uint64_t grid = (uint64_t)rows * out_features;
     uint32_t row_tile = rows == 1 ? 1 : rows == 2 ? 2 : 4;
     if (mode == 1) grid = (((uint64_t)rows + row_tile - 1) / row_tile) * (((uint64_t)out_features + 7) / 8);
-    if (mode == 2) grid = (((uint64_t)rows + 31) / 32) * (((uint64_t)out_features + 31) / 32);
+    // The larger tile reuses one decoded Q3 weight tile across 64 token rows.
+    // Leave the existing 32-row prefill route intact for other matrices and short prompts.
+    int wide_prefill = mode == 3 || (mode == 2 && rows >= 64
+            && ((in_features == 5120 && out_features == 34816)
+                    || (in_features == 17408 && out_features == 5120)));
+    if (mode == 2 || mode == 3) grid = (((uint64_t)rows + (wide_prefill ? 63 : 31)) / (wide_prefill ? 64 : 32))
+            * (((uint64_t)out_features + 31) / 32);
     if (grid > 2147483647u) return EUHEDRAL_CUDA_SIZE_OVERFLOW;
 #ifdef _WIN32
     if (!InitOnceExecuteOnce(&once, initialize_once, NULL, NULL)) return EUHEDRAL_CUDA_KERNEL_UNAVAILABLE;
@@ -61,12 +68,20 @@ static int linear_q3(const void* input, const void* weights, void* output,
     if (pthread_once(&once, initialize) != 0) return EUHEDRAL_CUDA_KERNEL_UNAVAILABLE;
 #endif
     if (init_status != EUHEDRAL_CUDA_SUCCESS) return init_status;
+    // A matched older NVRTC source may lack this optional tile. Retain the original
+    // 32-row prefill route for normal dispatch; explicit 64-row requests still fail.
+    if (mode == 2 && wide_prefill && prefill64 == NULL) {
+        wide_prefill = 0;
+        grid = (((uint64_t)rows + 31) / 32) * (((uint64_t)out_features + 31) / 32);
+        if (grid > 2147483647u) return EUHEDRAL_CUDA_SIZE_OVERFLOW;
+    }
     CUdeviceptr input_ptr = (CUdeviceptr)(uintptr_t)input, weights_ptr = (CUdeviceptr)(uintptr_t)weights;
     CUdeviceptr output_ptr = (CUdeviceptr)(uintptr_t)output;
     unsigned int rows_arg = rows, in_arg = in_features, out_arg = out_features;
     unsigned long long scale_arg = scale_offset;
     void* params[] = {&input_ptr, &weights_ptr, &output_ptr, &rows_arg, &in_arg, &out_arg, &scale_arg};
-    CUfunction selected = mode == 2 ? prefill : mode == 1 ? (row_tile == 1 ? decode1 : row_tile == 2 ? decode2 : decode4) : function;
+    CUfunction selected = wide_prefill ? prefill64 : mode == 2 ? prefill : mode == 1
+            ? (row_tile == 1 ? decode1 : row_tile == 2 ? decode2 : decode4) : function;
     if (selected == NULL) return EUHEDRAL_CUDA_KERNEL_UNAVAILABLE;
     CUresult status = cuLaunchKernel(selected, (unsigned int)grid, 1, 1, 128, 1, 1, 0, euhedral_cuda_submission_stream(), params, NULL);
     if (status != CUDA_SUCCESS) return (int)status;
@@ -88,4 +103,9 @@ int euhedral_cuda_linear_q3_decode_bf16(const void* input, const void* weights, 
 int euhedral_cuda_linear_q3_prefill_bf16(const void* input, const void* weights, void* output,
         uint32_t rows, uint32_t in_features, uint32_t out_features, uint64_t weights_byte_size) {
     return linear_q3(input, weights, output, rows, in_features, out_features, weights_byte_size, 2);
+}
+
+int euhedral_cuda_linear_q3_prefill_64_bf16(const void* input, const void* weights, void* output,
+        uint32_t rows, uint32_t in_features, uint32_t out_features, uint64_t weights_byte_size) {
+    return linear_q3(input, weights, output, rows, in_features, out_features, weights_byte_size, 3);
 }
