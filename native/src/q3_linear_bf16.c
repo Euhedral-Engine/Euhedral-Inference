@@ -68,6 +68,13 @@ static int linear_q3(const void* input, const void* weights, void* output,
     if (pthread_once(&once, initialize) != 0) return EUHEDRAL_CUDA_KERNEL_UNAVAILABLE;
 #endif
     if (init_status != EUHEDRAL_CUDA_SUCCESS) return init_status;
+    // A matched older NVRTC source may lack this optional tile. Retain the original
+    // 32-row prefill route for normal dispatch; explicit 64-row requests still fail.
+    if (mode == 2 && wide_prefill && prefill64 == NULL) {
+        wide_prefill = 0;
+        grid = (((uint64_t)rows + 31) / 32) * (((uint64_t)out_features + 31) / 32);
+        if (grid > 2147483647u) return EUHEDRAL_CUDA_SIZE_OVERFLOW;
+    }
     CUdeviceptr input_ptr = (CUdeviceptr)(uintptr_t)input, weights_ptr = (CUdeviceptr)(uintptr_t)weights;
     CUdeviceptr output_ptr = (CUdeviceptr)(uintptr_t)output;
     unsigned int rows_arg = rows, in_arg = in_features, out_arg = out_features;
