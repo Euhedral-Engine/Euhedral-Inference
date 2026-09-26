@@ -104,7 +104,7 @@ public final class InferenceEngine implements AutoCloseable {
         try {
             QwenTokenizer tokenizer = QwenTokenizer.load(config.tokenizerDirectory());
             QwenArtifact artifact = bootstrap.readArtifact(config.artifactPath());
-            gpu = bootstrap.openGpu(config.cudaLibraryPath(), tuning.gpuExecutionMode());
+            gpu = bootstrap.openGpu(config.cudaLibraryPath(), tuning);
             model = bootstrap.loadModel(config.artifactPath(), artifact, gpu);
             QwenExecutionPlan plan = new QwenExecutionPlan(model.weights());
             lattice = bootstrap.createLattice(config, gpu);
@@ -363,12 +363,12 @@ public final class InferenceEngine implements AutoCloseable {
             return QwenArtifactReader.read(path);
         }
 
-        ExecutionGpu openGpu(Path path, GpuExecutionMode mode) {
-            return mode == GpuExecutionMode.SYNC ? openGpu(path) : new CudaGpuMemory(path, true);
-        }
-
-        ExecutionGpu openGpu(Path path) {
-            return new CudaGpuMemory(path);
+        ExecutionGpu openGpu(Path path, InferenceTuning tuning) {
+            return new CudaGpuMemory(
+                    path,
+                    tuning.gpuExecutionMode() == GpuExecutionMode.ASYNC_EXPERIMENTAL,
+                    tuning.q3DispatchMode(),
+                    tuning.q3SmallRowThreshold());
         }
 
         QwenModel loadModel(Path path, QwenArtifact artifact, ExecutionGpu gpu) throws IOException {

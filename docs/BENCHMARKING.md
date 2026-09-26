@@ -2,8 +2,9 @@
 
 The `benchmark` Gradle module is an end-to-end harness. It loads `InferenceEngine`, creates a fresh
 `QwenGenerationSession` for every iteration, and runs the real tokenizer -> Euhedral lattice -> CUDA
-path. It is not part of `core` or `api` and is not packaged in the API JAR. Every row it writes is
-an end-to-end engine measurement; it has no operator-slice or direct-runtime mode.
+path. It is not part of `core` or `api` and is not packaged in the API JAR. The `run` command writes
+end-to-end engine measurements. The separate `q3` command writes explicitly labeled operator
+microbenchmarks, not engine results.
 
 ## Workflow
 
@@ -110,6 +111,8 @@ against the working directory, which is the repository root under `./gradlew :be
 | `gpuMemory` | `false` | Record device free/total memory before and after each iteration, outside timing. |
 | `gpuHeadroomMiB` | `1024` | Free memory required beyond the artifact size before loading. |
 | `gpuExecutionMode` | `SYNC` | `SYNC` (default) or `ASYNC_EXPERIMENTAL`. The latter submits GPU work to a CUDA stream and finalizes completed instructions through Euhedral completion frames. |
+| `q3DispatchMode` | `AUTO` | `SCALAR` retains the reference implementation; `DECODE` and `PREFILL` force independently callable kernels; `AUTO` selects by token-row count. |
+| `q3SmallRowThreshold` | `8` | `AUTO` uses decode at or below this row count and tiled prefill above it. Zero forces all nonempty Q3 projections through prefill. Recorded with the dispatch mode in run snapshots. |
 | `shutdownTimeoutSeconds` | `10` | Engine shutdown timeout. |
 
 CPU selection uses the core `ProcessorTopology`. Unavailable IDs are rejected, not dropped. On hosts
@@ -134,6 +137,37 @@ done
 The checked-in `forks.json` sets `"append": true` and writes to `benchmark-results/forks.jsonl`.
 Record the exact artifact and native library alongside these fork results; iterations inside one
 JVM are not independent replicates.
+
+## Packed Q3 operator screens
+
+The `q3 CONFIG.json [MATRIX ROWS]` command loads real packed artifact weights and compares scalar,
+decode, and tiled-prefill kernels on identical deterministic BF16 activations. Matrix names are
+`mixer-output`, `mlp-gate-up`, `mlp-down`, and `vocabulary`. Without a selector it sweeps 1, 2, 4,
+8, 16, 32, 256, and 512 token rows; the vocabulary sweep stops at 32 because generation now
+projects at most one row. Explicit selectors can request larger vocabulary cases.
+
+Build the distribution and set the native environment as shown above, then run:
+
+```bash
+benchmark/build/install/euhedral-inference-benchmark/bin/euhedral-inference-benchmark \
+  q3 benchmark/configs/smoke.json mlp-gate-up 256
+```
+
+Use a fresh non-`.json` output path: operator screens reject existing output even when the engine configuration
+allows append or overwrite. The output is always JSONL, with a distinct
+`euhedral-inference.q3-microbenchmark` schema. `warmup` and `iterations` control each forced path.
+The screen uses synchronous native-call timing including launch, clears 128 MiB of device memory
+before each sample outside timing, and records every sample plus BF16 absolute-error distributions
+against scalar. Decode must match scalar bitwise; tiled prefill must stay within one BF16 step
+or 0.001 absolute error near zero. A failed gate is recorded as `failed` and aborts the screen;
+such timing samples are not eligible results. That cache-clear size targets the current GPU; it is not a portable guarantee of
+complete cache eviction. Engine CPU selection, generation scenarios, dispatch selection, and async
+execution settings do not control these deliberately isolated operator calls.
+
+These screens are for rejecting poor candidates and measuring the row crossover. They do not
+replace full-model numerical qualification or independent JVM forks of `run`. Keep all production
+comparisons in the same `gpuExecutionMode`, including the existing per-worker persistent-stream
+mode when comparing against the async baseline.
 
 ## Prompts
 

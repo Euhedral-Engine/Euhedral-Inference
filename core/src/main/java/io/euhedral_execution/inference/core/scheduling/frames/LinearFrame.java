@@ -21,6 +21,10 @@ public final class LinearFrame extends QwenInstructionFrame {
 
     @Override
     protected void perform(QwenExecutionContext context, QwenExecutionPlan.Instruction instruction) {
+        int rows = instruction.outputBuffers().contains(QwenExecutionPlan.Buffer.LOGITS)
+                ? context.logitsRowCount()
+                : context.inputTokenCount();
+        if (rows == 0) return;
         long input = context.plan().hasFirstLayer()
                 ? context.workspace().address(instruction.inputBuffers().getFirst())
                 : context.workspace().normalizedStateAddress();
@@ -33,7 +37,7 @@ public final class LinearFrame extends QwenInstructionFrame {
                                 input,
                                 instruction.weightAddress(),
                                 output,
-                                context.inputTokenCount(),
+                                rows,
                                 instruction.inputWidth(),
                                 instruction.outputWidth(),
                                 instruction.weightByteSize());
@@ -42,7 +46,7 @@ public final class LinearFrame extends QwenInstructionFrame {
                                 input,
                                 instruction.weightAddress(),
                                 output,
-                                context.inputTokenCount(),
+                                rows,
                                 instruction.inputWidth(),
                                 instruction.outputWidth(),
                                 instruction.weightByteSize());
@@ -51,7 +55,7 @@ public final class LinearFrame extends QwenInstructionFrame {
                                 input,
                                 instruction.weightAddress(),
                                 output,
-                                context.inputTokenCount(),
+                                rows,
                                 instruction.inputWidth(),
                                 instruction.outputWidth(),
                                 instruction.weightByteSize());
@@ -60,7 +64,7 @@ public final class LinearFrame extends QwenInstructionFrame {
                                 input,
                                 instruction.weightAddress(),
                                 output,
-                                context.inputTokenCount(),
+                                rows,
                                 instruction.inputWidth(),
                                 instruction.outputWidth());
             default ->

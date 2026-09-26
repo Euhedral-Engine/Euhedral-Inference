@@ -24,11 +24,22 @@ public final class QwenExecutionWorkspace implements AutoCloseable {
     }
 
     QwenExecutionWorkspace(GpuMemory gpuMemory, int tokenCount, int hiddenSize, List<Integer> projectionWidths) {
-        this(gpuMemory, tokenCount, hiddenSize, projectionWidths, List.of());
+        this(gpuMemory, tokenCount, hiddenSize, projectionWidths, List.of(), QwenLogitsRequirement.ALL_TOKENS);
     }
 
     QwenExecutionWorkspace(GpuMemory gpuMemory, int tokenCount, QwenExecutionPlan plan) {
-        this(gpuMemory, tokenCount, plan.weights().config().hiddenSize(), List.of(), plan.bufferSpecs());
+        this(gpuMemory, tokenCount, plan, QwenLogitsRequirement.ALL_TOKENS);
+    }
+
+    QwenExecutionWorkspace(
+            GpuMemory gpuMemory, int tokenCount, QwenExecutionPlan plan, QwenLogitsRequirement logitsRequirement) {
+        this(
+                gpuMemory,
+                tokenCount,
+                plan.weights().config().hiddenSize(),
+                List.of(),
+                plan.bufferSpecs(),
+                logitsRequirement);
         if (!plan.hasFirstLayer()) {
             throw new IllegalArgumentException("first-layer buffers require a first-layer plan");
         }
@@ -39,10 +50,12 @@ public final class QwenExecutionWorkspace implements AutoCloseable {
             int tokenCount,
             int hiddenSize,
             List<Integer> projectionWidths,
-            List<QwenExecutionPlan.BufferSpec> firstLayerBuffers) {
+            List<QwenExecutionPlan.BufferSpec> firstLayerBuffers,
+            QwenLogitsRequirement logitsRequirement) {
         this.gpuMemory = Objects.requireNonNull(gpuMemory, "gpuMemory");
         Objects.requireNonNull(projectionWidths, "projectionWidths");
         Objects.requireNonNull(firstLayerBuffers, "firstLayerBuffers");
+        Objects.requireNonNull(logitsRequirement, "logitsRequirement");
         if (tokenCount <= 0) {
             throw new IllegalArgumentException("tokenCount must be positive");
         }
@@ -74,8 +87,12 @@ public final class QwenExecutionWorkspace implements AutoCloseable {
                 throw new IllegalArgumentException("duplicate first-layer buffer: " + spec.buffer());
             }
             int elementBytes = spec.elementType() == QwenExecutionPlan.ElementType.BF16 ? Short.BYTES : Float.BYTES;
+            int rows = spec.buffer() == QwenExecutionPlan.Buffer.LOGITS
+                            || spec.buffer() == QwenExecutionPlan.Buffer.FINAL_NORMALIZED
+                    ? logitsRequirement.outputRows(tokenCount)
+                    : tokenCount;
             this.firstLayerByteSizes[index] =
-                    Math.multiplyExact(Math.multiplyExact((long) tokenCount, spec.width()), elementBytes);
+                    Math.multiplyExact(Math.multiplyExact((long) rows, spec.width()), elementBytes);
         }
     }
 

@@ -1,5 +1,6 @@
 package io.euhedral_execution.inference.core.gpu;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -14,6 +15,102 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 class CudaGpuOperationsIntegrationTest {
+
+    @Test
+    void specializedQ3PathsMatchReferenceAcrossRowsAndEdgeTiles() throws Throwable {
+        Path library = Path.of(System.getProperty("euhedral.cuda.library"));
+        try (CudaGpuMemory gpu = new CudaGpuMemory(library);
+                Arena arena = Arena.ofConfined()) {
+            var symbols = java.lang.foreign.SymbolLookup.libraryLookup(library, arena);
+            var descriptor = java.lang.foreign.FunctionDescriptor.of(
+                    java.lang.foreign.ValueLayout.JAVA_INT,
+                    java.lang.foreign.ValueLayout.ADDRESS,
+                    java.lang.foreign.ValueLayout.ADDRESS,
+                    java.lang.foreign.ValueLayout.ADDRESS,
+                    java.lang.foreign.ValueLayout.JAVA_INT,
+                    java.lang.foreign.ValueLayout.JAVA_INT,
+                    java.lang.foreign.ValueLayout.JAVA_INT,
+                    java.lang.foreign.ValueLayout.JAVA_LONG);
+            for (String name :
+                    new String[] {"euhedral_cuda_linear_q3_decode_bf16", "euhedral_cuda_linear_q3_prefill_bf16"}) {
+                assertTrue(symbols.find(name).isPresent(), "missing independently callable Q3 path: " + name);
+                var kernel = java.lang.foreign.Linker.nativeLinker()
+                        .downcallHandle(symbols.find(name).orElseThrow(), descriptor);
+                for (int rows : new int[] {1, 2, 4, 17, 32, 33, 256, 512}) {
+                    int width = 192, outputs = 35;
+                    byte[] packed = q3Weights(outputs, width);
+                    short[] input = new short[rows * width];
+                    for (int i = 0; i < input.length; i++) input[i] = floatToBf16((i % 23 - 11) * 0.125f);
+                    long x = upload(gpu, arena, input), w = upload(gpu, arena, packed);
+                    long y = gpu.allocate((long) rows * outputs * Short.BYTES);
+                    try {
+                        gpu.linearQ3Bf16(x, w, y, rows, width, outputs, packed.length, Q3DispatchMode.SCALAR);
+                        short[] expected = download(gpu, arena, y, rows * outputs);
+                        int status = (int) kernel.invokeExact(
+                                MemorySegment.ofAddress(x),
+                                MemorySegment.ofAddress(w),
+                                MemorySegment.ofAddress(y),
+                                rows,
+                                width,
+                                outputs,
+                                (long) packed.length);
+                        assertEquals(0, status, name);
+                        short[] actual = download(gpu, arena, y, rows * outputs);
+                        if (name.contains("decode")) assertArrayEquals(expected, actual);
+                        else assertBf16Equals(expected, actual, 0.02f);
+                    } finally {
+                        gpu.free(y);
+                        gpu.free(w);
+                        gpu.free(x);
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    void specializedQ3PathsPreserveScaleEdgesAndPartialK() {
+        try (var gpu = new CudaGpuMemory(Path.of(System.getProperty("euhedral.cuda.library")));
+                var arena = Arena.ofConfined()) {
+            for (int width : new int[] {65, 192}) {
+                int rows = 33, outputs = 35, groups = ((width + 127) / 128) * 2;
+                byte[] packed = q3Weights(outputs, width);
+                int scaleOffset = (outputs * groups * 24 + 255) & ~255;
+                var scales = ByteBuffer.wrap(packed).order(ByteOrder.LITTLE_ENDIAN);
+                int[] edgeScales = {0, 1, 0x8001, 0x03ff, 0x0400, 0x3555, 0xb555, 0x7bff};
+                for (int out = 0; out < outputs; out++)
+                    for (int group = 0; group < groups; group++)
+                        scales.putShort(
+                                scaleOffset + (out * groups + group) * 2, (short) edgeScales[out % edgeScales.length]);
+                short[] input = new short[rows * width];
+                for (int i = 0; i < input.length; i++) input[i] = floatToBf16((i % 23 - 11) * 0.125f);
+                long x = upload(gpu, arena, input), w = upload(gpu, arena, packed);
+                long y = gpu.allocate((long) rows * outputs * Short.BYTES);
+                try {
+                    gpu.linearQ3Bf16(x, w, y, rows, width, outputs, packed.length, Q3DispatchMode.SCALAR);
+                    short[] expected = download(gpu, arena, y, rows * outputs);
+                    for (var mode : new Q3DispatchMode[] {Q3DispatchMode.DECODE, Q3DispatchMode.PREFILL}) {
+                        gpu.linearQ3Bf16(x, w, y, rows, width, outputs, packed.length, mode);
+                        short[] actual = download(gpu, arena, y, rows * outputs);
+                        if (mode == Q3DispatchMode.DECODE) assertArrayEquals(expected, actual);
+                        else
+                            for (int i = 0; i < actual.length; i++) {
+                                float error = Math.abs(bf16ToFloat(expected[i]) - bf16ToFloat(actual[i]));
+                                boolean adjacent = (expected[i] < 0) == (actual[i] < 0)
+                                        && Math.abs((expected[i] & 0xffff) - (actual[i] & 0xffff)) <= 1;
+                                assertTrue(
+                                        Float.isFinite(error) && (error <= 0.001f || adjacent),
+                                        "scale edge index " + i);
+                            }
+                    }
+                } finally {
+                    gpu.free(y);
+                    gpu.free(w);
+                    gpu.free(x);
+                }
+            }
+        }
+    }
 
     @Test
     void q3LinearReferenceDecodesSubnormalScale() {

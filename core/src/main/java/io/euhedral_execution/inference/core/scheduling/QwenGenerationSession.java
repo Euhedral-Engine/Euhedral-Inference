@@ -246,7 +246,10 @@ public final class QwenGenerationSession implements AutoCloseable {
                     this.sequence,
                     QwenExecutionContext.ExecutionKind.PREFILL,
                     this.sequence.currentTokenPosition(),
-                    Arrays.copyOfRange(promptTokenIds, offset, end));
+                    Arrays.copyOfRange(promptTokenIds, offset, end),
+                    end == promptTokenIds.length && maxNewTokens > 0
+                            ? QwenLogitsRequirement.LAST_TOKEN
+                            : QwenLogitsRequirement.NONE);
             nextToken = executeAndSelect(
                     prefill, end == promptTokenIds.length && maxNewTokens > 0, constraint, timing, started, true);
             if (isStopRequested()) return List.of();
@@ -286,7 +289,8 @@ public final class QwenGenerationSession implements AutoCloseable {
                     this.sequence,
                     QwenExecutionContext.ExecutionKind.DECODE,
                     this.sequence.currentTokenPosition(),
-                    new int[] {tokenId});
+                    new int[] {tokenId},
+                    anotherTokenAllowed ? QwenLogitsRequirement.LAST_TOKEN : QwenLogitsRequirement.NONE);
             // Commit the final non-terminal token for continuation without sampling beyond the limit.
             nextToken = executeAndSelect(decode, anotherTokenAllowed, constraint, timing, started, false);
             if (!anotherTokenAllowed) endedNormally = !isStopRequested();

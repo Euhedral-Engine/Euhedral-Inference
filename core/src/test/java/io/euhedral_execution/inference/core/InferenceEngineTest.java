@@ -277,9 +277,9 @@ class InferenceEngineTest {
                 }
 
                 @Override
-                ExecutionGpu openGpu(Path path) {
+                ExecutionGpu openGpu(Path path, InferenceTuning tuning) {
                     if (selected == 1) throw new IllegalStateException("gpu");
-                    return super.openGpu(path);
+                    return super.openGpu(path, tuning);
                 }
 
                 @Override
@@ -631,7 +631,7 @@ class InferenceEngineTest {
         }
 
         @Override
-        ExecutionGpu openGpu(Path path) {
+        ExecutionGpu openGpu(Path path, InferenceTuning tuning) {
             return gpu;
         }
 

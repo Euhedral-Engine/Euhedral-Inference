@@ -80,6 +80,18 @@ class BenchmarkOptionsTest {
     }
 
     @Test
+    void q3PolicySurvivesDefaultOutputAndSweep() throws Exception {
+        var options = load(
+                "\"q3DispatchMode\":\"AUTO\",\"q3SmallRowThreshold\":8,\"gpuExecutionMode\":\"ASYNC_EXPERIMENTAL\"");
+        var tuning = options.sweep(InferenceTuning.defaults(BenchmarkFixtures.bits(2)))
+                .getFirst();
+        assertEquals(io.euhedral_execution.inference.core.gpu.Q3DispatchMode.AUTO, tuning.q3DispatchMode());
+        assertEquals(8, tuning.q3SmallRowThreshold());
+        assertEquals(GpuExecutionMode.ASYNC_EXPERIMENTAL, tuning.gpuExecutionMode());
+        assertTrue(rejection("\"q3SmallRowThreshold\":-1").contains("threshold"));
+    }
+
+    @Test
     void bindsEveryAxisAndExpandsThePrefillSweep() throws Exception {
         var options = load("""
                 "cpus":"2-5,8","excludeCpus":[3],"excludeCores":[1],"prefillChunks":[512,256,1024],

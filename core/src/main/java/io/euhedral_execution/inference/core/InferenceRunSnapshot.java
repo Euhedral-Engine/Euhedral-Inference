@@ -2,6 +2,7 @@ package io.euhedral_execution.inference.core;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.euhedral_execution.inference.core.gpu.Q3DispatchMode;
 import io.euhedral_execution.inference.core.model_loader.config.QwenConfig;
 import io.euhedral_execution.inference.core.model_loader.config.QwenLayerType;
 import io.euhedral_execution.inference.core.sampling.GenerationConfig;
@@ -45,10 +46,25 @@ public record InferenceRunSnapshot(
         }
     }
 
-    public record Tuning(List<Integer> workerProcessorIds, int prefillChunkTokens, GpuExecutionMode gpuExecutionMode) {
+    public record Tuning(
+            List<Integer> workerProcessorIds,
+            int prefillChunkTokens,
+            GpuExecutionMode gpuExecutionMode,
+            Q3DispatchMode q3DispatchMode,
+            int q3SmallRowThreshold) {
         public Tuning {
             workerProcessorIds = List.copyOf(workerProcessorIds);
             gpuExecutionMode = gpuExecutionMode == null ? GpuExecutionMode.SYNC : gpuExecutionMode;
+            q3DispatchMode = q3DispatchMode == null ? Q3DispatchMode.SCALAR : q3DispatchMode;
+        }
+
+        public Tuning(List<Integer> workerProcessorIds, int prefillChunkTokens, GpuExecutionMode gpuExecutionMode) {
+            this(
+                    workerProcessorIds,
+                    prefillChunkTokens,
+                    gpuExecutionMode,
+                    Q3DispatchMode.AUTO,
+                    Q3DispatchMode.DEFAULT_SMALL_ROW_THRESHOLD);
         }
 
         public Tuning(List<Integer> workerProcessorIds, int prefillChunkTokens) {
@@ -56,7 +72,12 @@ public record InferenceRunSnapshot(
         }
 
         public static Tuning of(InferenceTuning tuning) {
-            return new Tuning(ids(tuning.workerProcessorIds()), tuning.prefillChunkTokens(), tuning.gpuExecutionMode());
+            return new Tuning(
+                    ids(tuning.workerProcessorIds()),
+                    tuning.prefillChunkTokens(),
+                    tuning.gpuExecutionMode(),
+                    tuning.q3DispatchMode(),
+                    tuning.q3SmallRowThreshold());
         }
     }
 

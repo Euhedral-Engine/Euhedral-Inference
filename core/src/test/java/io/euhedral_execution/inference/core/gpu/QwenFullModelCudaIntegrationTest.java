@@ -23,6 +23,7 @@ import io.euhedral_execution.inference.core.scheduling.GdnSequenceStates;
 import io.euhedral_execution.inference.core.scheduling.QwenExecutionContext;
 import io.euhedral_execution.inference.core.scheduling.QwenExecutionPlan;
 import io.euhedral_execution.inference.core.scheduling.QwenExecutionRunner;
+import io.euhedral_execution.inference.core.scheduling.QwenLogitsRequirement;
 import io.euhedral_execution.inference.core.scheduling.QwenLogitsSampler;
 import io.euhedral_execution.inference.core.scheduling.QwenSequenceState;
 import java.lang.foreign.Arena;
@@ -40,6 +41,39 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 class QwenFullModelCudaIntegrationTest {
+
+    private static void reportError(String name, short[] expected, short[] actual) {
+        double max = 0, total = 0, squared = 0;
+        int different = 0, overOne = 0, maxIndex = 0;
+        for (int i = 0; i < expected.length; i++) {
+            double error = Math.abs(bf16ToFloat(expected[i]) - bf16ToFloat(actual[i]));
+            if (error > max) {
+                max = error;
+                maxIndex = i;
+            }
+            total += error;
+            squared += error * error;
+            if (expected[i] != actual[i]) different++;
+            if (error > 1) overOne++;
+        }
+        System.out.printf(
+                java.util.Locale.ROOT,
+                "%s count=%d different=%d overOne=%d max=%g mean=%g rms=%g%n",
+                name,
+                expected.length,
+                different,
+                overOne,
+                max,
+                total / expected.length,
+                Math.sqrt(squared / expected.length));
+        System.out.printf(
+                java.util.Locale.ROOT,
+                "%s maxIndex=%d expected=%g actual=%g%n",
+                name,
+                maxIndex,
+                bf16ToFloat(expected[maxIndex]),
+                bf16ToFloat(actual[maxIndex]));
+    }
 
     private static final int INITIAL_TOKEN = 1814;
     private static final long VRAM_RESTORE_TOLERANCE = 128L * 1024L * 1024L;
@@ -61,9 +95,10 @@ class QwenFullModelCudaIntegrationTest {
             QwenExecutionPlan.Buffer.FFN_DELTA,
             QwenExecutionPlan.Buffer.FINAL_HIDDEN_STATE);
 
-    @Test
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(Q3DispatchMode.class)
     @Timeout(value = 1200, unit = TimeUnit.SECONDS)
-    void realCompactQwenRunsAllLayersAndMatchesCpuReferenceAcrossBoundaries() throws Exception {
+    void realCompactQwenRunsAllLayersAndMatchesCpuReferenceAcrossBoundaries(Q3DispatchMode mode) throws Exception {
         Path artifactPath = Path.of(System.getProperty("euhedral.qwen.artifact"));
         Path libraryPath = Path.of(System.getProperty("euhedral.cuda.library"));
         assertTrue(Files.isRegularFile(artifactPath), "compact Qwen artifact is missing: " + artifactPath);
@@ -72,7 +107,8 @@ class QwenFullModelCudaIntegrationTest {
         assertTrue(Arrays.asList(artifact.config().layerTypes()).contains(QwenLayerType.FULL_ATTENTION));
         assertTrue(Arrays.asList(artifact.config().layerTypes()).contains(QwenLayerType.GATED_DELTA_NET));
 
-        try (CudaGpuMemory gpu = new CudaGpuMemory(libraryPath)) {
+        try (CudaGpuMemory gpu =
+                new CudaGpuMemory(libraryPath, false, mode, Q3DispatchMode.DEFAULT_SMALL_ROW_THRESHOLD)) {
             long freeBefore = gpu.deviceMemoryInfo().freeBytes();
             QwenModel model = QwenModel.load(artifactPath, artifact, gpu);
             QwenWeights weights = model.weights();
@@ -222,10 +258,28 @@ class QwenFullModelCudaIntegrationTest {
                         ((AttentionSequenceStates) referenceSequence.kvCacheState())
                                 .forLayer(3)
                                 .length());
-                assertBf16Equals(
+                reportError(
+                        mode + " hidden",
                         reference.layerOutputs().get(63),
-                        cleanSequence.buffers().get(QwenExecutionPlan.Buffer.FINAL_HIDDEN_STATE),
-                        HIDDEN_TOLERANCE);
+                        cleanSequence.buffers().get(QwenExecutionPlan.Buffer.FINAL_HIDDEN_STATE));
+                reportError(
+                        mode + " normalized",
+                        reference.finalNormalized(),
+                        cleanSequence.buffers().get(QwenExecutionPlan.Buffer.FINAL_NORMALIZED));
+                reportError(mode + " logits", reference.logits(), cleanSequence.logits());
+                short[] expectedHidden = reference.layerOutputs().get(63);
+                short[] actualHidden = cleanSequence.buffers().get(QwenExecutionPlan.Buffer.FINAL_HIDDEN_STATE);
+                // Forced WMMA across 64 layers measured max 1.5, RMS 0.07655;
+                // scalar measured max 1.0, RMS 0.08269. Retain the original
+                // decode bound and independently constrain tiled aggregate error.
+                assertBf16Equals(
+                        expectedHidden, actualHidden, mode == Q3DispatchMode.PREFILL ? 2.0f : HIDDEN_TOLERANCE);
+                double hiddenSquareError = 0;
+                for (int i = 0; i < expectedHidden.length; i++) {
+                    double error = bf16ToFloat(expectedHidden[i]) - bf16ToFloat(actualHidden[i]);
+                    hiddenSquareError += error * error;
+                }
+                assertTrue(Math.sqrt(hiddenSquareError / expectedHidden.length) <= 0.1);
                 assertBf16Equals(
                         reference.finalNormalized(),
                         cleanSequence.buffers().get(QwenExecutionPlan.Buffer.FINAL_NORMALIZED),
@@ -391,6 +445,20 @@ class QwenFullModelCudaIntegrationTest {
             int[] tokenIds,
             List<QwenExecutionPlan.Buffer> capturedBuffers)
             throws Exception {
+        return execute(
+                gpu, plan, sequence, kind, startPosition, tokenIds, capturedBuffers, QwenLogitsRequirement.ALL_TOKENS);
+    }
+
+    private static RunResult execute(
+            CudaGpuMemory gpu,
+            QwenExecutionPlan plan,
+            QwenSequenceState sequence,
+            QwenExecutionContext.ExecutionKind kind,
+            long startPosition,
+            int[] tokenIds,
+            List<QwenExecutionPlan.Buffer> capturedBuffers,
+            QwenLogitsRequirement requirement)
+            throws Exception {
         EnumMap<QwenExecutionPlan.Buffer, short[]> buffers = new EnumMap<>(QwenExecutionPlan.Buffer.class);
         AtomicReference<short[]> logits = new AtomicReference<>();
         AtomicReference<QwenExecutionContext> completedContext = new AtomicReference<>();
@@ -417,7 +485,8 @@ class QwenFullModelCudaIntegrationTest {
         });
         new DefaultExecutor().input(runner);
         try {
-            var outcome = runner.submit(new QwenExecutionContext(plan, sequence, kind, startPosition, tokenIds));
+            var outcome =
+                    runner.submit(new QwenExecutionContext(plan, sequence, kind, startPosition, tokenIds, requirement));
             runner.request(plan.instructions().size());
             QwenExecutionContext.Outcome result = outcome.get(600, TimeUnit.SECONDS);
             RunResult run = new RunResult(completedContext.get(), buffers, logits.get());
@@ -427,6 +496,107 @@ class QwenFullModelCudaIntegrationTest {
             return run;
         } finally {
             runner.completeGracefully();
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(ints = {3, 33})
+    @Timeout(value = 600, unit = TimeUnit.SECONDS)
+    void logitsRequirementsPreserveEveryStateAndFinalVocabularyRow(int tokenCount) throws Exception {
+        Path artifactPath = Path.of(System.getProperty("euhedral.qwen.artifact"));
+        try (CudaGpuMemory gpu = new CudaGpuMemory(Path.of(System.getProperty("euhedral.cuda.library")));
+                QwenModel model = QwenModel.load(artifactPath, QwenArtifactReader.read(artifactPath), gpu)) {
+            var plan = new QwenExecutionPlan(model.weights());
+            var config = model.weights().config();
+            List<byte[]> expectedState = null;
+            short[] expectedLastRow = null;
+            short[] expectedHidden = null;
+            int[] tokens = new int[tokenCount];
+            Arrays.fill(tokens, INITIAL_TOKEN);
+            for (var requirement : List.of(
+                    QwenLogitsRequirement.ALL_TOKENS, QwenLogitsRequirement.LAST_TOKEN, QwenLogitsRequirement.NONE)) {
+                var sequence = new QwenSequenceState(701 + requirement.ordinal());
+                try {
+                    RunResult run = execute(
+                            gpu,
+                            plan,
+                            sequence,
+                            QwenExecutionContext.ExecutionKind.PREFILL,
+                            0,
+                            tokens,
+                            List.of(QwenExecutionPlan.Buffer.FINAL_HIDDEN_STATE),
+                            requirement);
+                    try {
+                        assertEquals(tokenCount, sequence.currentTokenPosition());
+                        short[] hidden = run.buffers().get(QwenExecutionPlan.Buffer.FINAL_HIDDEN_STATE);
+                        if (expectedHidden == null) expectedHidden = hidden;
+                        else assertArrayEquals(expectedHidden, hidden);
+                        List<byte[]> state = new ArrayList<>();
+                        for (int layer = 0; layer < config.numHiddenLayers(); layer++) {
+                            if (config.layerTypes()[layer] == QwenLayerType.GATED_DELTA_NET) {
+                                var gdn = ((GdnSequenceStates) sequence.recurrentState()).forLayer(layer);
+                                long channels = 2L * config.linearNumKeyHeads() * config.linearKeyHeadDim()
+                                        + (long) config.linearNumValueHeads() * config.linearValueHeadDim();
+                                state.add(readDeviceBytes(
+                                        gpu,
+                                        gdn.convolutionStateAddress(),
+                                        channels * (config.linearConvKernelDim() - 1) * Short.BYTES));
+                                state.add(readDeviceBytes(
+                                        gpu,
+                                        gdn.recurrentStateAddress(),
+                                        (long) config.linearNumValueHeads()
+                                                * config.linearKeyHeadDim()
+                                                * config.linearValueHeadDim()
+                                                * Float.BYTES));
+                            } else {
+                                var kv = ((AttentionSequenceStates) sequence.kvCacheState()).forLayer(layer);
+                                assertEquals(tokenCount, kv.length());
+                                long bytes = (long) kv.length()
+                                        * config.numKeyValueHeads()
+                                        * config.attentionHeadDim()
+                                        * Short.BYTES;
+                                state.add(readDeviceBytes(gpu, kv.keyCacheAddress(), bytes));
+                                state.add(readDeviceBytes(gpu, kv.valueCacheAddress(), bytes));
+                            }
+                        }
+                        if (expectedState == null) expectedState = state;
+                        else
+                            for (int index = 0; index < state.size(); index++)
+                                assertArrayEquals(expectedState.get(index), state.get(index), "state buffer " + index);
+                        if (requirement == QwenLogitsRequirement.ALL_TOKENS) {
+                            assertEquals(tokenCount * config.vocabSize(), run.logits().length);
+                            expectedLastRow = Arrays.copyOfRange(
+                                    run.logits(),
+                                    (tokenCount - 1) * config.vocabSize(),
+                                    tokenCount * config.vocabSize());
+                        } else if (requirement == QwenLogitsRequirement.LAST_TOKEN) {
+                            assertEquals(config.vocabSize(), run.logits().length);
+                            reportError("last-row-" + tokenCount, expectedLastRow, run.logits());
+                            if (tokenCount == 3) assertArrayEquals(expectedLastRow, run.logits());
+                            else {
+                                // WMMA versus decode measured max 0.0625 and RMS 0.000818.
+                                // Bound rounding by one BF16 step, with an absolute floor
+                                // for near-zero cancellation; transformer state stays exact.
+                                for (int i = 0; i < expectedLastRow.length; i++) {
+                                    short expected = expectedLastRow[i], actual = run.logits()[i];
+                                    float error = Math.abs(bf16ToFloat(expected) - bf16ToFloat(actual));
+                                    boolean adjacent = (expected < 0) == (actual < 0)
+                                            && Math.abs((expected & 0xffff) - (actual & 0xffff)) <= 1;
+                                    assertTrue(
+                                            Float.isFinite(error) && (error <= 0.001f || adjacent),
+                                            "last row index " + i);
+                                }
+                            }
+                        } else {
+                            assertTrue(run.context().logitsOutput().isEmpty());
+                        }
+                    } finally {
+                        run.closeLogits();
+                    }
+                } finally {
+                    sequence.complete();
+                }
+            }
         }
     }
 

@@ -39,6 +39,7 @@ public final class QwenExecutionContext {
     private final QwenExecutionPlan plan;
     private final QwenSequenceState sequence;
     private final ExecutionKind kind;
+    private final QwenLogitsRequirement logitsRequirement;
     private final long startPosition;
     private final int[] tokenIds;
     private final AtomicBoolean submitted = new AtomicBoolean();
@@ -57,7 +58,18 @@ public final class QwenExecutionContext {
             ExecutionKind kind,
             long startPosition,
             int[] tokenIds) {
+        this(plan, sequence, kind, startPosition, tokenIds, QwenLogitsRequirement.ALL_TOKENS);
+    }
+
+    public QwenExecutionContext(
+            QwenExecutionPlan plan,
+            QwenSequenceState sequence,
+            ExecutionKind kind,
+            long startPosition,
+            int[] tokenIds,
+            QwenLogitsRequirement logitsRequirement) {
         this.plan = Objects.requireNonNull(plan, "plan");
+        this.logitsRequirement = Objects.requireNonNull(logitsRequirement, "logitsRequirement");
         this.sequence = Objects.requireNonNull(sequence, "sequence");
         this.kind = Objects.requireNonNull(kind, "kind");
         Objects.requireNonNull(tokenIds, "tokenIds");
@@ -83,6 +95,14 @@ public final class QwenExecutionContext {
 
     public int inputTokenCount() {
         return this.tokenIds.length;
+    }
+
+    public QwenLogitsRequirement logitsRequirement() {
+        return this.logitsRequirement;
+    }
+
+    public int logitsRowCount() {
+        return this.logitsRequirement.outputRows(this.tokenIds.length);
     }
 
     public long startPosition() {
@@ -208,7 +228,7 @@ public final class QwenExecutionContext {
             }
             initializeSequenceState(gpu);
             this.workspace = this.plan.hasFirstLayer()
-                    ? new QwenExecutionWorkspace(gpu, this.tokenIds.length, this.plan)
+                    ? new QwenExecutionWorkspace(gpu, this.tokenIds.length, this.plan, this.logitsRequirement)
                     : new QwenExecutionWorkspace(
                             gpu,
                             this.tokenIds.length,
@@ -365,10 +385,7 @@ public final class QwenExecutionContext {
         long address = this.workspace.detachAddress(QwenExecutionPlan.Buffer.LOGITS);
         try {
             this.logitsOutput = new QwenDeviceLogits(
-                    gpu,
-                    address,
-                    this.tokenIds.length,
-                    this.plan.weights().config().vocabSize());
+                    gpu, address, logitsRowCount(), this.plan.weights().config().vocabSize());
         } catch (RuntimeException | Error constructionFailure) {
             try {
                 gpu.free(address);

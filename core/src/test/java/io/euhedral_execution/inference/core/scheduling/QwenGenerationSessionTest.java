@@ -182,6 +182,7 @@ class QwenGenerationSessionTest {
             assertArrayEquals(new int[] {1}, gpu.embeddingInputs.getLast());
             assertEquals(encoded.length + 1L, session.currentTokenPosition());
             assertEquals(1, gpu.sampledLogitRows.size(), "only the final prefill chunk should sample");
+            assertEquals(1, gpu.allocatedLogits.size(), "non-final prefill and final commit need no logits");
             assertEquals(gpu.sampledLogitRows, gpu.sampledLogitCloses);
             assertTrue(gpu.pendingLogits.isEmpty());
             assertFalse(runtime.hasAttachedRunner());
@@ -315,7 +316,7 @@ class QwenGenerationSessionTest {
             assertArrayEquals(new int[] {1}, gpu.embeddingInputs.get(2));
             assertEquals(List.of(0L, 1L, 2L), gpu.attentionStartPositions);
             assertEquals(List.of(eosToken, 1), session.generatedTokenIds());
-            assertEquals(3, gpu.allocatedLogits.size());
+            assertEquals(2, gpu.allocatedLogits.size());
             assertEquals(new java.util.HashSet<>(gpu.allocatedLogits), new java.util.HashSet<>(gpu.closedLogits));
             assertFalse(runtime.hasAttachedRunner());
         } finally {
@@ -540,7 +541,7 @@ class QwenGenerationSessionTest {
         @Override
         public long allocate(long byteSize) {
             long address = super.allocate(byteSize);
-            if (byteSize == (long) this.vocabularySize * Short.BYTES) {
+            if (byteSize % ((long) this.vocabularySize * Short.BYTES) == 0) {
                 this.allocatedLogits.add(address);
                 this.liveLogits.add(address);
             }
@@ -559,8 +560,7 @@ class QwenGenerationSessionTest {
         @Override
         public void copyDeviceToHost(MemorySegment destination, long source, long byteSize) {
             if (byteSize != (long) this.vocabularySize * Short.BYTES) return;
-            long rowBytes = (long) this.vocabularySize * Short.BYTES;
-            long logitsBase = source - (long) (this.lastTokenCount - 1) * rowBytes;
+            long logitsBase = source;
             this.sampledLogitRows.add(logitsBase);
             this.pendingLogits.add(logitsBase);
             int selected = this.selectedTokenIds.length == 0

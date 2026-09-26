@@ -1,5 +1,6 @@
 package io.euhedral_execution.inference.core;
 
+import io.euhedral_execution.inference.core.gpu.Q3DispatchMode;
 import io.euhedral_execution.inference.core.scheduling.QwenGenerationSession;
 import java.util.BitSet;
 import java.util.Objects;
@@ -11,7 +12,12 @@ import java.util.Objects;
 /// [WorkerProcessorSelection] to derive them from topology. The set is copied on input and output.
 /// `prefillChunkTokens` bounds the prompt tokens submitted per prefill quantum and therefore the
 /// per-quantum GPU workspace. It does not change the token sequence.
-public record InferenceTuning(BitSet workerProcessorIds, int prefillChunkTokens, GpuExecutionMode gpuExecutionMode) {
+public record InferenceTuning(
+        BitSet workerProcessorIds,
+        int prefillChunkTokens,
+        GpuExecutionMode gpuExecutionMode,
+        Q3DispatchMode q3DispatchMode,
+        int q3SmallRowThreshold) {
     public static final int DEFAULT_PREFILL_CHUNK_TOKENS = QwenGenerationSession.DEFAULT_PREFILL_CHUNK_TOKENS;
 
     public InferenceTuning {
@@ -20,6 +26,17 @@ public record InferenceTuning(BitSet workerProcessorIds, int prefillChunkTokens,
         if (workerProcessorIds.isEmpty()) throw new IllegalArgumentException("workerProcessorIds must not be empty");
         if (prefillChunkTokens <= 0) throw new IllegalArgumentException("prefillChunkTokens must be positive");
         gpuExecutionMode = Objects.requireNonNull(gpuExecutionMode, "gpuExecutionMode");
+        Objects.requireNonNull(q3DispatchMode, "q3DispatchMode");
+        if (q3SmallRowThreshold < 0) throw new IllegalArgumentException("Q3 threshold must not be negative");
+    }
+
+    public InferenceTuning(BitSet workerProcessorIds, int prefillChunkTokens, GpuExecutionMode gpuExecutionMode) {
+        this(
+                workerProcessorIds,
+                prefillChunkTokens,
+                gpuExecutionMode,
+                Q3DispatchMode.AUTO,
+                Q3DispatchMode.DEFAULT_SMALL_ROW_THRESHOLD);
     }
 
     public InferenceTuning(BitSet workerProcessorIds, int prefillChunkTokens) {
@@ -37,15 +54,23 @@ public record InferenceTuning(BitSet workerProcessorIds, int prefillChunkTokens,
     }
 
     public InferenceTuning withWorkerProcessorIds(BitSet ids) {
-        return new InferenceTuning(ids, this.prefillChunkTokens, this.gpuExecutionMode);
+        return new InferenceTuning(
+                ids, this.prefillChunkTokens, this.gpuExecutionMode, this.q3DispatchMode, this.q3SmallRowThreshold);
     }
 
     public InferenceTuning withPrefillChunkTokens(int tokens) {
-        return new InferenceTuning(this.workerProcessorIds, tokens, this.gpuExecutionMode);
+        return new InferenceTuning(
+                this.workerProcessorIds, tokens, this.gpuExecutionMode, this.q3DispatchMode, this.q3SmallRowThreshold);
     }
 
     public InferenceTuning withGpuExecutionMode(GpuExecutionMode mode) {
-        return new InferenceTuning(this.workerProcessorIds, this.prefillChunkTokens, mode);
+        return new InferenceTuning(
+                this.workerProcessorIds, this.prefillChunkTokens, mode, this.q3DispatchMode, this.q3SmallRowThreshold);
+    }
+
+    public InferenceTuning withQ3Dispatch(Q3DispatchMode mode, int smallRowThreshold) {
+        return new InferenceTuning(
+                this.workerProcessorIds, this.prefillChunkTokens, this.gpuExecutionMode, mode, smallRowThreshold);
     }
 
     @Override

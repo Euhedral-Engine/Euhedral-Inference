@@ -65,6 +65,10 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
     private final MethodHandle rmsNormBf16;
     private final MethodHandle rmsNormUnitOffsetBf16;
     private final MethodHandle linearQ3Bf16;
+    private final MethodHandle linearQ3DecodeBf16;
+    private final MethodHandle linearQ3PrefillBf16;
+    private final Q3DispatchMode q3DispatchMode;
+    private final int q3SmallRowThreshold;
     private final MethodHandle linearQuantizedBf16;
     private final MethodHandle linearBf16ToFloat;
     private final MethodHandle gdnControlFp32;
@@ -84,7 +88,15 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
     }
 
     public CudaGpuMemory(Path libraryPath, boolean asynchronous) {
+        this(libraryPath, asynchronous, Q3DispatchMode.AUTO, Q3DispatchMode.DEFAULT_SMALL_ROW_THRESHOLD);
+    }
+
+    public CudaGpuMemory(
+            Path libraryPath, boolean asynchronous, Q3DispatchMode q3DispatchMode, int q3SmallRowThreshold) {
         Objects.requireNonNull(libraryPath, "libraryPath");
+        this.q3DispatchMode = Objects.requireNonNull(q3DispatchMode, "q3DispatchMode");
+        if (q3SmallRowThreshold < 0) throw new IllegalArgumentException("Q3 threshold must not be negative");
+        this.q3SmallRowThreshold = q3SmallRowThreshold;
         Arena loadedLibraryArena = Arena.ofShared();
         try {
             SymbolLookup symbols = SymbolLookup.libraryLookup(libraryPath, loadedLibraryArena);
@@ -184,6 +196,18 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
             this.rmsNormUnitOffsetBf16 =
                     bind(linker, symbols, "euhedral_cuda_rms_norm_unit_offset_bf16", RMS_NORM_UNIT_OFFSET_BF16);
             this.linearQ3Bf16 = bind(linker, symbols, "euhedral_cuda_linear_q3_bf16", LINEAR_Q3_BF16);
+            // An explicitly scalar owner can still inspect or execute an older native package.
+            // Optimized policies fail at construction rather than silently falling back.
+            this.linearQ3DecodeBf16 = q3DispatchMode == Q3DispatchMode.SCALAR
+                            && symbols.find("euhedral_cuda_linear_q3_decode_bf16")
+                                    .isEmpty()
+                    ? null
+                    : bind(linker, symbols, "euhedral_cuda_linear_q3_decode_bf16", LINEAR_Q3_BF16);
+            this.linearQ3PrefillBf16 = q3DispatchMode == Q3DispatchMode.SCALAR
+                            && symbols.find("euhedral_cuda_linear_q3_prefill_bf16")
+                                    .isEmpty()
+                    ? null
+                    : bind(linker, symbols, "euhedral_cuda_linear_q3_prefill_bf16", LINEAR_Q3_BF16);
             this.linearQuantizedBf16 =
                     bind(linker, symbols, "euhedral_cuda_linear_quantized_bf16", LINEAR_QUANTIZED_BF16);
             this.linearBf16ToFloat = bind(linker, symbols, "euhedral_cuda_linear_bf16_to_float", LINEAR_BF16_TO_FLOAT);
@@ -692,6 +716,27 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
             int inFeatures,
             int outFeatures,
             long weightsByteSize) {
+        linearQ3Bf16(
+                inputAddress,
+                weightsAddress,
+                outputAddress,
+                rows,
+                inFeatures,
+                outFeatures,
+                weightsByteSize,
+                this.q3DispatchMode.select(rows, this.q3SmallRowThreshold));
+    }
+
+    /// Forces a Q3 path without changing this GPU owner's immutable production dispatch policy.
+    public void linearQ3Bf16(
+            long inputAddress,
+            long weightsAddress,
+            long outputAddress,
+            int rows,
+            int inFeatures,
+            int outFeatures,
+            long weightsByteSize,
+            Q3DispatchMode mode) {
         ensureOpen();
         requireAddresses(inputAddress, weightsAddress, outputAddress);
         if (rows <= 0 || inFeatures <= 0 || outFeatures <= 0 || weightsByteSize <= 0) {
@@ -699,7 +744,16 @@ public final class CudaGpuMemory extends ExecutionGpu implements AutoCloseable {
         }
         int status;
         try {
-            status = (int) linearQ3Bf16.invokeExact(
+            MethodHandle kernel =
+                    switch (Objects.requireNonNull(mode, "mode").select(rows, this.q3SmallRowThreshold)) {
+                        case SCALAR -> this.linearQ3Bf16;
+                        case DECODE -> this.linearQ3DecodeBf16;
+                        case PREFILL -> this.linearQ3PrefillBf16;
+                        case AUTO -> throw new AssertionError("unresolved Q3 dispatch");
+                    };
+            if (kernel == null)
+                throw new GpuMemoryException("native package does not provide the requested Q3 path: " + mode);
+            status = (int) kernel.invokeExact(
                     MemorySegment.ofAddress(inputAddress),
                     MemorySegment.ofAddress(weightsAddress),
                     MemorySegment.ofAddress(outputAddress),
