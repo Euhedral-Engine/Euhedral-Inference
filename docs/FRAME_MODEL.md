@@ -311,6 +311,86 @@ Sampling with temperature or a vocabulary constraint still copies the row. Six p
 64 + 128 +0.96% (6 of 6), decode 1024 + 128 +0.84% (6 of 6). Time to first token did not change beyond
 run-to-run noise.
 
+## Execution shape and remaining DAG width
+
+A temporary trace marked every stage submission and publication (NVTX) and joined them with the
+kernel, stream and stream-wait records of Nsight Systems, for decode 1024 + 128 and prefill 1024
+(512-row quanta). For each frame it gives lane, host and device time, cross-lane waits, which
+predecessor gated each join and how much other work was published but not yet started.
+
+- **Decode is a chain.** A frame start found on average 0.23 other frames published and waiting
+  (at most 2).
+  - In a GDN layer the Q5 value/Z projection (61 us) is the critical branch. Q4 (19 us) and the
+    control projection (13 us) overlap it on side lanes and finish 46-50 us before their joins.
+  - The control kernel only gets SMs as Q5's CTAs drain, so it fills Q5's tail. That is why exclusive
+    time attributes ~600 us/token to it although it never gates the recurrence.
+  - Every other join waits on the single chain of DRAM-bound GEMVs (gate/up 91 us, down 47 us, output
+    17 us per layer), which more frame width cannot shorten.
+- **Prefill is a chain of tensor-core GEMMs.** Per 512-row GDN layer: projections 1.4-1.8 ms, gate/up +
+  SwiGLU 2.8-3.0 ms, down 1.4-1.6 ms, output 0.6-0.9 ms. Waiting frames averaged 0.12 (at most 1). The
+  only side branches, the GDN control projection (1.27 ms of slack) and the attention KV branch, already
+  run on side lanes.
+- **The remaining fused frames are hardware leaves, not hidden branches:** the grouped Q4+Q5 GEMM,
+  the SwiGLU epilogue, residual + RMSNorm, split-K down + reduce (a chain).
+- **Streamed FFN.** At a 1024-row quantum its gate/up and down regions span 8.99 ms against 9.99 ms
+  of kernel time: 10% overlap, at the tails of adjacent regions, bounded by the two staging slots and
+  by each region filling the GPU. As frames the regions would expose the same overlap with more
+  hand-offs, so the internally coordinated unit is the right shape, and it still earns its place: at
+  1024-row quanta the full-width gate/up + split-K down region lost 0.77% / 0.73% (prefill 1024 / 2048,
+  0 of 6) against it. It runs only for 1024-row quanta, which the default 512-token prefill chunk never
+  forms; 1024-token chunks with the streamed FFN measured -0.24% / -0.33% (0 of 6) against the default.
+
+## Lane count
+
+Six paired forks per point, PATH placement, against the default of 32 lanes (one per processor):
+
+| lanes | decode 64 | decode 1024 | prefill 256 | prefill 1024 |
+|---|---|---|---|---|
+| 1 | -0.86% (1/6) | -0.89% (0/6) | -1.35% (0/6) | -0.31% (1/6) |
+| 2 | -0.08% | +0.20% | -0.90% (1/6) | -0.36% (1/6) |
+| 4 | -0.15% | +0.04% | -0.27% (0/6) | -0.24% (1/6) |
+| 8 | -0.30% (0/6) | +0.04% | -0.10% | +0.03% |
+
+The losses shrink about as 1/lanes, the chance that a side branch's random lane is the chain's lane.
+Making side branches avoid their predecessor's lane confirmed it for prefill (2 lanes: +0.15% /
++0.01% against 32) but cost decode 64 1.0% (0/6): a GDN layer fans out three ways, and with two lanes
+Q5 and the control projection always share the one side lane. At 32 lanes avoidance is neutral
+(+0.06%, -0.09%, -0.01%), so it is not kept. The lanes needed are the DAG's fan-out width (3 in decode,
+2 in prefill) plus headroom for random placement; the per-processor default is past both.
+
+## Heterogeneous CPU/GPU leaves in decode
+
+With the decode DAG reduced to one chain plus three short fan-outs per GDN layer, the only CPU candidate
+that is both independent and small is the GDN control projection (two 5120 x 48 BF16 projections and
+the decay/gate math), a side branch with ~50 us of slack. Its upper bound was measured before building
+anything: skipping the GPU control kernel in decode (wrong results, timing only) gained +0.35% (decode
+64, 5 of 6) and +0.28% (decode 1024, 6 of 6). A CPU version would add, per GDN layer and 48 times per
+token, a device-to-host copy of the normalized row behind a host wait, the projection on the CPU, and a
+host-to-device copy plus a device-side wait before the recurrence, all inside a ~65 us GPU window. The
+ceiling does not cover that, so no CPU leaf was built. Decode's GEMVs are DRAM-bound and form the
+critical chain; there is no slower-but-overlappable CPU work underneath them that the GPU would shed.
+
+## The token boundary
+
+The decode token boundary, measured without a profiler (System.nanoTime stamps, decode 64 + 128, 640
+tokens; median from the driver's retirement callback): retirement starts 4 us, stage retirement hooks
+done 19 us, context retired 23 us, outcome published 30 us, session observes it 39 us, next quantum
+submitted 51 us, admitted 73 us, its root frame starts 77 us and has submitted the token upload and
+embedding at 102 us (p90 230 us). That is ~0.6% of a 16.8 ms token. Under Nsight Systems the same
+boundary measured ~300 us: the profiler inflates hand-offs and delays the first device work after the
+host's submission, which a standalone test (pinned 4-byte upload + kernel after 300 us idle: 5 us; a
+stream callback before it: 6 us) does not reproduce.
+
+- Letting the session thread spin on the outcome instead of parking: -0.06% / -0.06% (2 of 6): the
+  thread wake is not the cost. Running the next admission as a continuation on the retiring worker would
+  therefore save little and was not built.
+- Removing the boundary entirely needs the device to run ahead of the host: the next quantum admitted
+  before the current one retires, its embedding reading the token the device argmax selected, and the
+  host verifying and emitting token t while the GPU computes t + 1. That is the natural CPU-under-GPU
+  overlap for decode, but end-of-sequence then requires undoing the speculative quantum's GDN and
+  convolution state updates (double-buffered state, ~150 MB per sequence). With the boundary at ~0.6%
+  it is not pursued now.
+
 ## Plan views
 
 For a complete model, `QwenExecutionPlan.forExecution(kind, rows)` selects the topology per quantum.
